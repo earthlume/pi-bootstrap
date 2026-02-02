@@ -7,12 +7,13 @@
 # HOW:   Auto-detects hardware, picks FULL or LITE tier
 #
 # USAGE: curl -fsSL <url> | bash
-#    or: bash pi-bootstrap.sh [--optimize] [--no-chsh] [--info-only]
+#    or: bash pi-bootstrap.sh [--optimize] [--update-os] [--no-chsh] [--info-only]
 #
 # FLAGS:
 #   --optimize   Apply safe system tweaks (swappiness, journald limits)
+#   --update-os  Run full apt upgrade (safe OS update, no firmware)
 #   --no-chsh    Don't change default shell to zsh
-#   --info-only  Just print system info and exit (for pasting back to Claude)
+#   --info-only  Just print system info and exit (for pasting back to Cosmo)
 #===============================================================================
 
 set -euo pipefail
@@ -36,20 +37,32 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 BOLD='\033[1m'
 
+# Status tracking
+declare -A STATUS
+FAILURES=0
+
 #-------------------------------------------------------------------------------
 # PARSE ARGUMENTS
 #-------------------------------------------------------------------------------
 DO_OPTIMIZE=false
+DO_UPDATE_OS=false
 DO_CHSH=true
 INFO_ONLY=false
 
 for arg in "$@"; do
     case $arg in
         --optimize)   DO_OPTIMIZE=true ;;
+        --update-os)  DO_UPDATE_OS=true ;;
         --no-chsh)    DO_CHSH=false ;;
         --info-only)  INFO_ONLY=true ;;
         --help|-h)
-            echo "Usage: $0 [--optimize] [--no-chsh] [--info-only]"
+            echo "Usage: $0 [--optimize] [--update-os] [--no-chsh] [--info-only]"
+            echo ""
+            echo "Flags:"
+            echo "  --optimize   Apply safe system tweaks (swappiness, journald)"
+            echo "  --update-os  Run full apt upgrade (no firmware updates)"
+            echo "  --no-chsh    Don't change default shell to zsh"
+            echo "  --info-only  Just print system info and exit"
             exit 0
             ;;
     esac
@@ -81,6 +94,16 @@ header() {
     echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════${NC}" | tee -a "$LOG_FILE"
 }
 
+# Track step status
+track_status() {
+    local step="$1"
+    local result="$2"  # "OK" or "FAIL" or "SKIP"
+    STATUS["$step"]="$result"
+    if [[ "$result" == "FAIL" ]]; then
+        ((FAILURES++)) || true
+    fi
+}
+
 #-------------------------------------------------------------------------------
 # SYSTEM DETECTION
 #-------------------------------------------------------------------------------
@@ -110,8 +133,10 @@ detect_system() {
     if [[ -f /etc/os-release ]]; then
         source /etc/os-release
         OS_NAME="${PRETTY_NAME:-Unknown}"
+        OS_VERSION_ID="${VERSION_ID:-unknown}"
     else
         OS_NAME="Unknown"
+        OS_VERSION_ID="unknown"
     fi
     log "OS: $OS_NAME"
     
@@ -130,7 +155,8 @@ detect_system() {
     # Storage
     ROOT_SIZE=$(df -h / | awk 'NR==2 {print $2}')
     ROOT_AVAIL=$(df -h / | awk 'NR==2 {print $4}')
-    log "Root filesystem: $ROOT_SIZE total, $ROOT_AVAIL available"
+    ROOT_USED_PCT=$(df -h / | awk 'NR==2 {print $5}')
+    log "Root filesystem: $ROOT_SIZE total, $ROOT_AVAIL available ($ROOT_USED_PCT used)"
     
     # Decide tier
     if [[ $RAM_MB -ge $MIN_RAM_FOR_FULL_MB && $BITS -eq 64 ]]; then
@@ -146,6 +172,119 @@ detect_system() {
         HAS_PCIE=true
     fi
     log "PCIe detected: $HAS_PCIE"
+    
+    track_status "Hardware Detection" "OK"
+}
+
+#-------------------------------------------------------------------------------
+# EXTENDED HARDWARE DETECTION (for summary)
+#-------------------------------------------------------------------------------
+detect_extended_hardware() {
+    # CPU info
+    CPU_CORES=$(nproc 2>/dev/null || echo "?")
+    CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo "ARM")
+    
+    # Temperature
+    if [[ -f /sys/class/thermal/thermal_zone0/temp ]]; then
+        TEMP_RAW=$(cat /sys/class/thermal/thermal_zone0/temp)
+        TEMP_C=$((TEMP_RAW / 1000))
+    else
+        TEMP_C="N/A"
+    fi
+    
+    # Throttling status (Pi-specific)
+    if command -v vcgencmd &>/dev/null; then
+        THROTTLE_STATUS=$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2 || echo "N/A")
+    else
+        THROTTLE_STATUS="vcgencmd not available"
+    fi
+    
+    # Camera detection
+    if [[ -d /dev/video0 ]] || ls /dev/video* &>/dev/null; then
+        CAMERA_DEVICES=$(ls /dev/video* 2>/dev/null | tr '\n' ' ' || echo "none")
+    else
+        CAMERA_DEVICES="none detected"
+    fi
+    
+    # Check for libcamera (newer Pi camera stack)
+    if command -v libcamera-hello &>/dev/null; then
+        LIBCAMERA="installed"
+    else
+        LIBCAMERA="not installed"
+    fi
+    
+    # I2C status
+    if [[ -e /dev/i2c-1 ]]; then
+        I2C_STATUS="enabled"
+        if command -v i2cdetect &>/dev/null; then
+            I2C_DEVICES=$(i2cdetect -y 1 2>/dev/null | grep -c "^[0-9]" || echo "0")
+            I2C_DEVICES="${I2C_DEVICES} bus(es) scanned"
+        else
+            I2C_DEVICES="i2c-tools not installed"
+        fi
+    else
+        I2C_STATUS="disabled"
+        I2C_DEVICES="N/A"
+    fi
+    
+    # SPI status
+    if [[ -e /dev/spidev0.0 ]]; then
+        SPI_STATUS="enabled"
+    else
+        SPI_STATUS="disabled"
+    fi
+    
+    # GPIO status
+    if [[ -d /sys/class/gpio ]]; then
+        GPIO_STATUS="available"
+    else
+        GPIO_STATUS="not available"
+    fi
+    
+    # USB devices
+    if command -v lsusb &>/dev/null; then
+        USB_DEVICES=$(lsusb 2>/dev/null | wc -l || echo "0")
+        USB_DEVICE_LIST=$(lsusb 2>/dev/null | grep -v "hub" | head -5 || echo "none")
+    else
+        USB_DEVICES="lsusb not available"
+        USB_DEVICE_LIST=""
+    fi
+    
+    # Network interfaces
+    NET_INTERFACES=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -v lo | tr '\n' ' ' || echo "unknown")
+    
+    # WiFi status
+    if command -v iwconfig &>/dev/null; then
+        WIFI_INTERFACE=$(iwconfig 2>/dev/null | grep -o "^wlan[0-9]" | head -1 || echo "none")
+    else
+        WIFI_INTERFACE=$(ip link show 2>/dev/null | grep -o "wlan[0-9]" | head -1 || echo "none")
+    fi
+    
+    # Bluetooth
+    if command -v bluetoothctl &>/dev/null; then
+        BT_STATUS="available"
+    elif [[ -d /sys/class/bluetooth ]]; then
+        BT_STATUS="available (no bluetoothctl)"
+    else
+        BT_STATUS="not detected"
+    fi
+    
+    # Boot config location (varies by OS version)
+    if [[ -f /boot/firmware/config.txt ]]; then
+        BOOT_CONFIG="/boot/firmware/config.txt"
+    elif [[ -f /boot/config.txt ]]; then
+        BOOT_CONFIG="/boot/config.txt"
+    else
+        BOOT_CONFIG="not found"
+    fi
+    
+    # Check for common Pi overlays/settings
+    if [[ -f "$BOOT_CONFIG" && "$BOOT_CONFIG" != "not found" ]]; then
+        BOOT_OVERLAYS=$(grep "^dtoverlay=" "$BOOT_CONFIG" 2>/dev/null | cut -d= -f2 | tr '\n' ', ' || echo "none")
+        [[ -z "$BOOT_OVERLAYS" ]] && BOOT_OVERLAYS="none configured"
+    else
+        BOOT_OVERLAYS="unknown"
+    fi
 }
 
 #-------------------------------------------------------------------------------
@@ -153,24 +292,61 @@ detect_system() {
 #-------------------------------------------------------------------------------
 print_system_info() {
     detect_system
+    detect_extended_hardware
     
-    header "SYSTEM INFO — PASTE THIS BACK TO CLAUDE"
+    header "SYSTEM INFO — PASTE THIS BACK TO COSMO"
     
     cat <<EOF
 
 \`\`\`
-PI_MODEL:    $PI_MODEL
-ARCH:        $ARCH ($BITS-bit)
-RAM_MB:      $RAM_MB
-OS:          $OS_NAME
-KERNEL:      $KERNEL
-TIER:        $TIER
-HAS_PCIE:    $HAS_PCIE
-ROOT_SIZE:   $ROOT_SIZE
-ROOT_AVAIL:  $ROOT_AVAIL
-HOSTNAME:    $(hostname)
-USER:        $(whoami)
-DATE:        $(date -Iseconds)
+═══════════════════════════════════════════════════════════
+SYSTEM PROFILE — $(date -Iseconds)
+═══════════════════════════════════════════════════════════
+
+HARDWARE
+--------
+PI_MODEL:     $PI_MODEL
+ARCH:         $ARCH ($BITS-bit)
+CPU:          $CPU_MODEL ($CPU_CORES cores)
+RAM_MB:       $RAM_MB
+TEMP:         ${TEMP_C}°C
+THROTTLE:     $THROTTLE_STATUS
+TIER:         $TIER
+
+STORAGE
+-------
+ROOT_SIZE:    $ROOT_SIZE
+ROOT_AVAIL:   $ROOT_AVAIL
+ROOT_USED:    $ROOT_USED_PCT
+
+OS
+--
+OS:           $OS_NAME
+KERNEL:       $KERNEL
+HOSTNAME:     $(hostname)
+USER:         $(whoami)
+BOOT_CONFIG:  $BOOT_CONFIG
+
+INTERFACES
+----------
+I2C:          $I2C_STATUS ($I2C_DEVICES)
+SPI:          $SPI_STATUS
+GPIO:         $GPIO_STATUS
+PCIe:         $HAS_PCIE
+NETWORK:      $NET_INTERFACES
+WIFI:         $WIFI_INTERFACE
+BLUETOOTH:    $BT_STATUS
+
+PERIPHERALS
+-----------
+CAMERA:       $CAMERA_DEVICES
+LIBCAMERA:    $LIBCAMERA
+USB_DEVICES:  $USB_DEVICES
+OVERLAYS:     $BOOT_OVERLAYS
+
+USB DEVICE LIST:
+$USB_DEVICE_LIST
+═══════════════════════════════════════════════════════════
 \`\`\`
 
 EOF
@@ -178,9 +354,9 @@ EOF
     # Additional info if Pi 5
     if echo "$PI_MODEL" | grep -qi "pi 5"; then
         echo "--- Pi 5 Specific ---"
-        if [[ -f /boot/firmware/config.txt ]]; then
-            echo "PCIe config in /boot/firmware/config.txt:"
-            grep -i pcie /boot/firmware/config.txt 2>/dev/null || echo "(no pcie settings found)"
+        if [[ -f "$BOOT_CONFIG" ]]; then
+            echo "PCIe config:"
+            grep -i pcie "$BOOT_CONFIG" 2>/dev/null || echo "(no pcie settings found)"
         fi
     fi
 }
@@ -199,14 +375,59 @@ backup_configs() {
         "$HOME/.p10k.zsh"
     )
     
+    local backed_up=0
     for file in "${files_to_backup[@]}"; do
         if [[ -f "$file" ]]; then
             cp "$file" "$BACKUP_DIR/"
             success "Backed up: $file"
+            ((backed_up++))
         fi
     done
     
     log "Backups stored in: $BACKUP_DIR"
+    
+    if [[ $backed_up -gt 0 ]]; then
+        track_status "Backup Configs" "OK"
+    else
+        track_status "Backup Configs" "SKIP"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# UPDATE OS (optional)
+#-------------------------------------------------------------------------------
+update_os() {
+    header "UPDATING OS PACKAGES"
+    
+    if [[ "$DO_UPDATE_OS" == false ]]; then
+        log "Skipping OS update (use --update-os flag to enable)"
+        track_status "OS Update" "SKIP"
+        return 0
+    fi
+    
+    log "Running apt update..."
+    if sudo apt-get update -qq; then
+        success "Package lists updated"
+    else
+        error "apt update failed"
+        track_status "OS Update" "FAIL"
+        return 1
+    fi
+    
+    log "Running apt upgrade (this may take a while)..."
+    if sudo apt-get upgrade -y -qq; then
+        success "OS packages upgraded"
+        track_status "OS Update" "OK"
+    else
+        error "apt upgrade failed"
+        track_status "OS Update" "FAIL"
+        return 1
+    fi
+    
+    # Check if reboot needed
+    if [[ -f /var/run/reboot-required ]]; then
+        warn "Reboot required after updates"
+    fi
 }
 
 #-------------------------------------------------------------------------------
@@ -216,7 +437,11 @@ install_packages() {
     header "INSTALLING PACKAGES"
     
     log "Updating package lists..."
-    sudo apt-get update -qq
+    if ! sudo apt-get update -qq; then
+        error "apt update failed"
+        track_status "Install Packages" "FAIL"
+        return 1
+    fi
     
     local packages=(
         zsh
@@ -232,8 +457,14 @@ install_packages() {
     )
     
     log "Installing: ${packages[*]}"
-    sudo apt-get install -y -qq "${packages[@]}"
-    success "Packages installed"
+    if sudo apt-get install -y -qq "${packages[@]}"; then
+        success "Packages installed"
+        track_status "Install Packages" "OK"
+    else
+        error "Package installation failed"
+        track_status "Install Packages" "FAIL"
+        return 1
+    fi
 }
 
 #-------------------------------------------------------------------------------
@@ -244,12 +475,19 @@ install_ohmyzsh() {
     
     if [[ -d "$HOME/.oh-my-zsh" ]]; then
         warn "oh-my-zsh already installed, skipping"
+        track_status "Oh-My-Zsh" "SKIP"
         return 0
     fi
     
     log "Installing oh-my-zsh (unattended)..."
-    RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-    success "oh-my-zsh installed"
+    if RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"; then
+        success "oh-my-zsh installed"
+        track_status "Oh-My-Zsh" "OK"
+    else
+        error "oh-my-zsh installation failed"
+        track_status "Oh-My-Zsh" "FAIL"
+        return 1
+    fi
 }
 
 #-------------------------------------------------------------------------------
@@ -261,12 +499,18 @@ install_plugins() {
     # Ensure custom dir exists
     mkdir -p "$ZSH_CUSTOM/plugins"
     
+    local plugin_failures=0
+    
     # zsh-autosuggestions
     local autosug_dir="$ZSH_CUSTOM/plugins/zsh-autosuggestions"
     if [[ ! -d "$autosug_dir" ]]; then
         log "Installing zsh-autosuggestions..."
-        git clone --depth=1 https://github.com/zsh-users/zsh-autosuggestions "$autosug_dir"
-        success "zsh-autosuggestions installed"
+        if git clone --depth=1 https://github.com/zsh-users/zsh-autosuggestions "$autosug_dir"; then
+            success "zsh-autosuggestions installed"
+        else
+            error "zsh-autosuggestions failed"
+            ((plugin_failures++))
+        fi
     else
         warn "zsh-autosuggestions already present"
     fi
@@ -275,14 +519,24 @@ install_plugins() {
     local synhi_dir="$ZSH_CUSTOM/plugins/zsh-syntax-highlighting"
     if [[ ! -d "$synhi_dir" ]]; then
         log "Installing zsh-syntax-highlighting..."
-        git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting "$synhi_dir"
-        success "zsh-syntax-highlighting installed"
+        if git clone --depth=1 https://github.com/zsh-users/zsh-syntax-highlighting "$synhi_dir"; then
+            success "zsh-syntax-highlighting installed"
+        else
+            error "zsh-syntax-highlighting failed"
+            ((plugin_failures++))
+        fi
     else
         warn "zsh-syntax-highlighting already present"
     fi
     
     # z (directory jumper) - comes with oh-my-zsh, just needs enabling
     success "z plugin ready (bundled with oh-my-zsh)"
+    
+    if [[ $plugin_failures -eq 0 ]]; then
+        track_status "Zsh Plugins" "OK"
+    else
+        track_status "Zsh Plugins" "FAIL"
+    fi
 }
 
 #-------------------------------------------------------------------------------
@@ -295,10 +549,17 @@ install_p10k() {
     
     if [[ ! -d "$p10k_dir" ]]; then
         log "Cloning powerlevel10k..."
-        git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$p10k_dir"
-        success "powerlevel10k installed"
+        if git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$p10k_dir"; then
+            success "powerlevel10k installed"
+            track_status "Powerlevel10k" "OK"
+        else
+            error "powerlevel10k installation failed"
+            track_status "Powerlevel10k" "FAIL"
+            return 1
+        fi
     else
         warn "powerlevel10k already present"
+        track_status "Powerlevel10k" "SKIP"
     fi
 }
 
@@ -320,19 +581,30 @@ install_fonts() {
     )
     
     local base_url="https://github.com/romkatv/powerlevel10k-media/raw/master"
+    local font_failures=0
     
     for font in "${fonts[@]}"; do
         local decoded_font=$(echo "$font" | sed 's/%20/ /g')
         if [[ ! -f "$font_dir/$decoded_font" ]]; then
             log "Downloading: $decoded_font"
-            curl -fsSL -o "$font_dir/$decoded_font" "$base_url/$font" || warn "Failed to download $decoded_font"
+            if ! curl -fsSL -o "$font_dir/$decoded_font" "$base_url/$font"; then
+                warn "Failed to download $decoded_font"
+                ((font_failures++))
+            fi
         fi
     done
     
     # Rebuild font cache
     log "Rebuilding font cache..."
     fc-cache -f "$font_dir" 2>/dev/null || true
-    success "Fonts installed (configure your terminal to use 'MesloLGS NF')"
+    
+    if [[ $font_failures -eq 0 ]]; then
+        success "Fonts installed (configure your terminal to use 'MesloLGS NF')"
+        track_status "Nerd Fonts" "OK"
+    else
+        warn "Some fonts failed to download"
+        track_status "Nerd Fonts" "FAIL"
+    fi
 }
 
 #-------------------------------------------------------------------------------
@@ -476,6 +748,7 @@ ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE=20
 ZSHRC_BODY
 
     success ".zshrc generated"
+    track_status "Generate .zshrc" "OK"
 }
 
 #-------------------------------------------------------------------------------
@@ -491,6 +764,7 @@ generate_p10k_config() {
     fi
     
     success ".p10k.zsh generated (tier: $TIER)"
+    track_status "Generate .p10k.zsh" "OK"
 }
 
 generate_p10k_full() {
@@ -661,6 +935,7 @@ change_shell() {
     
     if [[ "$DO_CHSH" == false ]]; then
         warn "Skipping shell change (--no-chsh flag set)"
+        track_status "Change Shell" "SKIP"
         return 0
     fi
     
@@ -668,6 +943,7 @@ change_shell() {
     
     if [[ "$SHELL" == "$zsh_path" ]]; then
         success "zsh is already default shell"
+        track_status "Change Shell" "OK"
         return 0
     fi
     
@@ -679,6 +955,7 @@ change_shell() {
         echo -e "    ${BOLD}chsh -s $zsh_path${NC}"
         echo ""
         warn "Then log out and back in."
+        track_status "Change Shell" "SKIP"
         return 0
     fi
     
@@ -686,8 +963,10 @@ change_shell() {
     if chsh -s "$zsh_path"; then
         success "Default shell changed to zsh"
         warn "Log out and back in (or reboot) for change to take effect"
+        track_status "Change Shell" "OK"
     else
         error "chsh failed — run manually: chsh -s $zsh_path"
+        track_status "Change Shell" "FAIL"
     fi
 }
 
@@ -699,15 +978,22 @@ apply_optimizations() {
     
     if [[ "$DO_OPTIMIZE" == false ]]; then
         log "Skipping optimizations (use --optimize flag to enable)"
+        track_status "Optimizations" "SKIP"
         return 0
     fi
+    
+    local opt_failures=0
     
     # Reduce swappiness (less aggressive swap on SD cards)
     if [[ $(cat /proc/sys/vm/swappiness) -gt 10 ]]; then
         log "Reducing swappiness to 10..."
-        echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swappiness.conf > /dev/null
-        sudo sysctl -p /etc/sysctl.d/99-swappiness.conf
-        success "Swappiness reduced"
+        if echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swappiness.conf > /dev/null; then
+            sudo sysctl -p /etc/sysctl.d/99-swappiness.conf 2>/dev/null
+            success "Swappiness reduced"
+        else
+            error "Failed to set swappiness"
+            ((opt_failures++))
+        fi
     else
         success "Swappiness already optimal"
     fi
@@ -716,56 +1002,140 @@ apply_optimizations() {
     if [[ -f /etc/systemd/journald.conf ]]; then
         if ! grep -q "^SystemMaxUse=50M" /etc/systemd/journald.conf; then
             log "Limiting journald to 50MB..."
-            sudo sed -i 's/^#SystemMaxUse=.*/SystemMaxUse=50M/' /etc/systemd/journald.conf
-            sudo sed -i 's/^SystemMaxUse=.*/SystemMaxUse=50M/' /etc/systemd/journald.conf
-            sudo systemctl restart systemd-journald
-            success "Journald limited"
+            if sudo sed -i 's/^#SystemMaxUse=.*/SystemMaxUse=50M/' /etc/systemd/journald.conf && \
+               sudo sed -i 's/^SystemMaxUse=.*/SystemMaxUse=50M/' /etc/systemd/journald.conf; then
+                sudo systemctl restart systemd-journald 2>/dev/null
+                success "Journald limited"
+            else
+                error "Failed to configure journald"
+                ((opt_failures++))
+            fi
         else
             success "Journald already limited"
         fi
     fi
     
-    success "Optimizations applied"
+    if [[ $opt_failures -eq 0 ]]; then
+        success "Optimizations applied"
+        track_status "Optimizations" "OK"
+    else
+        track_status "Optimizations" "FAIL"
+    fi
 }
 
 #-------------------------------------------------------------------------------
-# FINAL SUMMARY
+# FINAL SUMMARY WITH STATUS REPORT
 #-------------------------------------------------------------------------------
 print_summary() {
-    header "SETUP COMPLETE"
+    detect_extended_hardware
+    
+    header "BOOTSTRAP COMPLETE"
+    
+    # Status report
+    echo ""
+    echo -e "${BOLD}INSTALLATION STATUS${NC}"
+    echo "───────────────────────────────────────────────────────────"
+    
+    for step in "Hardware Detection" "Backup Configs" "OS Update" "Install Packages" \
+                "Oh-My-Zsh" "Zsh Plugins" "Powerlevel10k" "Nerd Fonts" \
+                "Generate .zshrc" "Generate .p10k.zsh" "Change Shell" "Optimizations"; do
+        local status="${STATUS[$step]:-N/A}"
+        case $status in
+            OK)   echo -e "  ${GREEN}✓${NC} $step" ;;
+            FAIL) echo -e "  ${RED}✗${NC} $step" ;;
+            SKIP) echo -e "  ${YELLOW}○${NC} $step (skipped)" ;;
+            *)    echo -e "  ${BLUE}?${NC} $step" ;;
+        esac
+    done
+    
+    echo ""
+    if [[ $FAILURES -gt 0 ]]; then
+        echo -e "${RED}⚠ $FAILURES step(s) failed — review above for details${NC}"
+    else
+        echo -e "${GREEN}✓ All steps completed successfully${NC}"
+    fi
+    
+    # Next steps
+    echo ""
+    echo -e "${BOLD}NEXT STEPS${NC}"
+    echo "───────────────────────────────────────────────────────────"
+    echo "  1. Run: chsh -s $(which zsh)  (if not done automatically)"
+    echo "  2. Log out and back in (or run: exec zsh)"
+    echo "  3. Configure your terminal font to 'MesloLGS NF'"
+    echo "  4. To customize prompt: p10k configure"
+    
+    # File locations
+    echo ""
+    echo -e "${BOLD}FILES CREATED${NC}"
+    echo "───────────────────────────────────────────────────────────"
+    echo "  Config:   ~/.zshrc, ~/.p10k.zsh"
+    echo "  Backups:  $BACKUP_DIR"
+    echo "  Log:      $LOG_FILE"
+    
+    # System profile
+    echo ""
+    echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${CYAN}  SYSTEM PROFILE — PASTE TO COSMO FOR FURTHER SETUP${NC}"
+    echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════${NC}"
     
     cat <<EOF
 
-${GREEN}✓ Installation Summary${NC}
-  • zsh + oh-my-zsh installed
-  • powerlevel10k theme configured (tier: $TIER)
-  • Plugins: zsh-autosuggestions, zsh-syntax-highlighting, z
-  • ADHD-friendly aliases and settings applied
-  • Backups saved to: $BACKUP_DIR
-  • Log saved to: $LOG_FILE
-
-${YELLOW}⚠ NEXT STEPS${NC}
-  1. ${BOLD}Log out and back in${NC} (or run: exec zsh)
-  2. ${BOLD}Configure your terminal font${NC} to 'MesloLGS NF'
-     (For SSH: configure your local terminal, not the Pi)
-  3. To customize your prompt later, run: p10k configure
-
-${CYAN}═══════════════════════════════════════════════════════════${NC}
-${CYAN}  SYSTEM INFO — PASTE BACK TO CLAUDE IF NEEDED${NC}
-${CYAN}═══════════════════════════════════════════════════════════${NC}
-
 \`\`\`
-PI_MODEL:    $PI_MODEL
-ARCH:        $ARCH ($BITS-bit)
-RAM_MB:      $RAM_MB
-OS:          $OS_NAME
-KERNEL:      $KERNEL
-TIER:        $TIER
-HAS_PCIE:    $HAS_PCIE
-HOSTNAME:    $(hostname)
-USER:        $(whoami)
-DATE:        $(date -Iseconds)
-BOOTSTRAP:   pi-bootstrap.sh completed
+BOOTSTRAP REPORT — $(date -Iseconds)
+════════════════════════════════════════════════════════════
+
+HARDWARE
+  Model:        $PI_MODEL
+  Architecture: $ARCH ($BITS-bit)
+  CPU:          $CPU_CORES cores
+  RAM:          ${RAM_MB} MB
+  Temperature:  ${TEMP_C}°C
+  Throttle:     $THROTTLE_STATUS
+  Tier:         $TIER
+
+STORAGE
+  Total:        $ROOT_SIZE
+  Available:    $ROOT_AVAIL
+  Used:         $ROOT_USED_PCT
+
+SOFTWARE
+  OS:           $OS_NAME
+  Kernel:       $KERNEL
+  Hostname:     $(hostname)
+  User:         $(whoami)
+  Shell:        $SHELL → $(which zsh)
+
+INTERFACES
+  I2C:          $I2C_STATUS
+  SPI:          $SPI_STATUS
+  GPIO:         $GPIO_STATUS
+  PCIe:         $HAS_PCIE
+  WiFi:         $WIFI_INTERFACE
+  Bluetooth:    $BT_STATUS
+  Network:      $NET_INTERFACES
+
+PERIPHERALS
+  Camera:       $CAMERA_DEVICES
+  Libcamera:    $LIBCAMERA
+  USB devices:  $USB_DEVICES
+  Overlays:     $BOOT_OVERLAYS
+
+BOOTSTRAP STATUS
+  Failures:     $FAILURES
+  Tier:         $TIER
+  Optimized:    $DO_OPTIMIZE
+  OS Updated:   $DO_UPDATE_OS
+
+DETECTED USB DEVICES
+$USB_DEVICE_LIST
+
+SUGGESTED NEXT STEPS FOR COSMO
+  • Project type: [DESCRIBE YOUR PROJECT HERE]
+  • Need camera? $( [[ "$CAMERA_DEVICES" == "none detected" ]] && echo "Yes - need to enable/configure" || echo "Detected: $CAMERA_DEVICES" )
+  • Need I2C?    $( [[ "$I2C_STATUS" == "disabled" ]] && echo "Yes - run: sudo raspi-config" || echo "Already enabled" )
+  • Need SPI?    $( [[ "$SPI_STATUS" == "disabled" ]] && echo "Yes - run: sudo raspi-config" || echo "Already enabled" )
+
+════════════════════════════════════════════════════════════
 \`\`\`
 
 EOF
@@ -778,6 +1148,7 @@ main() {
     echo ""
     echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup              ║${NC}"
+    echo -e "${BOLD}${CYAN}║     by Echolume                                           ║${NC}"
     echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
@@ -793,6 +1164,7 @@ main() {
     # Full install
     detect_system
     backup_configs
+    update_os
     install_packages
     install_ohmyzsh
     install_plugins
@@ -803,6 +1175,9 @@ main() {
     change_shell
     apply_optimizations
     print_summary
+    
+    # Exit with failure count (0 = success)
+    exit $FAILURES
 }
 
 main "$@"
