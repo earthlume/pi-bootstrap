@@ -14,6 +14,7 @@
 #   --update-os  Run full apt upgrade (safe OS update, no firmware)
 #   --no-chsh    Don't change default shell to zsh
 #   --info-only  Just print system info and exit (for pasting back to Cosmo)
+#   --no-motd    Skip MOTD installation
 #===============================================================================
 
 set -euo pipefail
@@ -47,6 +48,7 @@ FAILURES=0
 DO_OPTIMIZE=false
 DO_UPDATE_OS=false
 DO_CHSH=true
+DO_MOTD=true
 INFO_ONLY=false
 
 for arg in "$@"; do
@@ -54,14 +56,16 @@ for arg in "$@"; do
         --optimize)   DO_OPTIMIZE=true ;;
         --update-os)  DO_UPDATE_OS=true ;;
         --no-chsh)    DO_CHSH=false ;;
+        --no-motd)    DO_MOTD=false ;;
         --info-only)  INFO_ONLY=true ;;
         --help|-h)
-            echo "Usage: $0 [--optimize] [--update-os] [--no-chsh] [--info-only]"
+            echo "Usage: $0 [--optimize] [--update-os] [--no-chsh] [--no-motd] [--info-only]"
             echo ""
             echo "Flags:"
             echo "  --optimize   Apply safe system tweaks (swappiness, journald)"
             echo "  --update-os  Run full apt upgrade (no firmware updates)"
             echo "  --no-chsh    Don't change default shell to zsh"
+            echo "  --no-motd    Don't install custom MOTD"
             echo "  --info-only  Just print system info and exit"
             exit 0
             ;;
@@ -928,6 +932,170 @@ P10K_LITE
 }
 
 #-------------------------------------------------------------------------------
+# INSTALL CUSTOM MOTD
+#-------------------------------------------------------------------------------
+install_motd() {
+    header "INSTALLING CUSTOM MOTD"
+    
+    if [[ "$DO_MOTD" == false ]]; then
+        log "Skipping MOTD (--no-motd flag set)"
+        track_status "Custom MOTD" "SKIP"
+        return 0
+    fi
+    
+    log "Creating dynamic MOTD script..."
+    
+    # Create the MOTD script
+    sudo tee /etc/profile.d/99-echolume-motd.sh > /dev/null << 'MOTD_SCRIPT'
+#!/bin/bash
+#===============================================================================
+# Echolume's Fun Homelab — Dynamic MOTD
+# lab.hoens.fun
+#===============================================================================
+
+# Colors
+C_RESET='\033[0m'
+C_BOLD='\033[1m'
+C_DIM='\033[2m'
+C_RED='\033[0;31m'
+C_GREEN='\033[0;32m'
+C_YELLOW='\033[0;33m'
+C_BLUE='\033[0;34m'
+C_MAGENTA='\033[0;35m'
+C_CYAN='\033[0;36m'
+C_WHITE='\033[0;37m'
+
+# Taglines — random on each login
+TAGLINES=(
+    "It compiles. Ship it."
+    "Works on my machine ™"
+    "Working as intended. Probably."
+    "TODO: document this later"
+    "¯\\_(ツ)_/¯ but it works"
+    "Powered by caffeine and spite"
+    "Trust the process. Or don't."
+    "Chaotic good infrastructure"
+    "sudo make me a sandwich"
+    "DNS: it's always DNS"
+    "There's no place like 127.0.0.1"
+    "I'll refactor this tomorrow"
+    "Not a bug, a surprise feature"
+    "Held together with zip ties and optimism"
+    "Future me problem"
+    "git commit -m 'fixed stuff'"
+    "chmod 777 and pray"
+    "Over-engineered with love"
+    "99% uptime, 1% existential dread"
+    "Keep calm and blame the network"
+)
+
+# Pick random tagline
+TAGLINE="${TAGLINES[$RANDOM % ${#TAGLINES[@]}]}"
+
+# Gather system info
+HOSTNAME_UPPER=$(hostname | tr '[:lower:]' '[:upper:]')
+UPTIME_STR=$(uptime -p 2>/dev/null | sed 's/up //' || echo "unknown")
+
+# Temperature with color coding
+if [[ -f /sys/class/thermal/thermal_zone0/temp ]]; then
+    TEMP_RAW=$(cat /sys/class/thermal/thermal_zone0/temp)
+    TEMP_C=$((TEMP_RAW / 1000))
+    if [[ $TEMP_C -lt 50 ]]; then
+        TEMP_COLOR="${C_GREEN}"
+    elif [[ $TEMP_C -lt 65 ]]; then
+        TEMP_COLOR="${C_YELLOW}"
+    else
+        TEMP_COLOR="${C_RED}"
+    fi
+    TEMP_STR="${TEMP_COLOR}${TEMP_C}°C${C_RESET}"
+else
+    TEMP_STR="${C_DIM}N/A${C_RESET}"
+fi
+
+# CPU usage
+CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print int($2)}' 2>/dev/null || echo "?")
+
+# RAM
+RAM_TOTAL=$(free -m | awk '/^Mem:/ {print $2}')
+RAM_USED=$(free -m | awk '/^Mem:/ {print $3}')
+RAM_PCT=$((RAM_USED * 100 / RAM_TOTAL))
+if [[ $RAM_PCT -lt 70 ]]; then
+    RAM_COLOR="${C_GREEN}"
+elif [[ $RAM_PCT -lt 85 ]]; then
+    RAM_COLOR="${C_YELLOW}"
+else
+    RAM_COLOR="${C_RED}"
+fi
+RAM_STR="${RAM_COLOR}${RAM_USED}/${RAM_TOTAL}M (${RAM_PCT}%)${C_RESET}"
+
+# Disk usage
+DISK_INFO=$(df -h / | awk 'NR==2 {print $3"/"$2" ("$5")"}')
+DISK_PCT=$(df / | awk 'NR==2 {print $5}' | tr -d '%')
+if [[ $DISK_PCT -lt 70 ]]; then
+    DISK_COLOR="${C_GREEN}"
+elif [[ $DISK_PCT -lt 85 ]]; then
+    DISK_COLOR="${C_YELLOW}"
+else
+    DISK_COLOR="${C_RED}"
+fi
+DISK_STR="${DISK_COLOR}${DISK_INFO}${C_RESET}"
+
+# IP address
+IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "unknown")
+# Get interface name
+if command -v ip &>/dev/null; then
+    NET_IF=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' | head -1 || echo "eth0")
+else
+    NET_IF="eth0"
+fi
+
+# Model (short version)
+if [[ -f /proc/device-tree/model ]]; then
+    PI_MODEL=$(tr -d '\0' < /proc/device-tree/model | sed 's/Raspberry Pi /RPi /')
+else
+    PI_MODEL="Linux"
+fi
+
+# Print the MOTD
+echo ""
+echo -e "${C_CYAN}╭─────────────────────────────────────────────────────────────────╮${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_BOLD}${C_MAGENTA}█▀▀ ${HOSTNAME_UPPER}${C_RESET}$(printf '%*s' $((43 - ${#HOSTNAME_UPPER})) '')${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}lab.hoens.fun${C_RESET}       ${C_DIM}\"${TAGLINE}\"${C_RESET}$(printf '%*s' $((30 - ${#TAGLINE})) '')${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}├─────────────────────────────────────────────────────────────────┤${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Model${C_RESET}   ${PI_MODEL}$(printf '%*s' $((52 - ${#PI_MODEL})) '')${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Uptime${C_RESET}  ${UPTIME_STR}$(printf '%*s' $((52 - ${#UPTIME_STR})) '')${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Temp${C_RESET}    ${TEMP_STR}$(printf '%*s' $((43)) '')${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}CPU${C_RESET}     ${CPU_USAGE}%          ${C_DIM}RAM${C_RESET}  ${RAM_STR}$(printf '%*s' $((22)) '')${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Disk${C_RESET}    ${DISK_STR}$(printf '%*s' $((37)) '')${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}IP${C_RESET}      ${IP_ADDR} ${C_DIM}(${NET_IF})${C_RESET}$(printf '%*s' $((42 - ${#IP_ADDR} - ${#NET_IF})) '')${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}├─────────────────────────────────────────────────────────────────┤${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Quick:${C_RESET} temp · update · ports · htop · duf                    ${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}╰─────────────────────────────────────────────────────────────────╯${C_RESET}"
+echo ""
+MOTD_SCRIPT
+
+    # Make it executable
+    sudo chmod +x /etc/profile.d/99-echolume-motd.sh
+    
+    # Disable default MOTD components that clutter the login
+    if [[ -d /etc/update-motd.d ]]; then
+        log "Disabling default MOTD scripts..."
+        sudo chmod -x /etc/update-motd.d/* 2>/dev/null || true
+    fi
+    
+    # Disable last login message (we have our own now)
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        if ! grep -q "^PrintLastLog no" /etc/ssh/sshd_config; then
+            log "Disabling SSH last login message..."
+            echo "PrintLastLog no" | sudo tee -a /etc/ssh/sshd_config > /dev/null
+        fi
+    fi
+    
+    success "Custom MOTD installed"
+    track_status "Custom MOTD" "OK"
+}
+
+#-------------------------------------------------------------------------------
 # CHANGE DEFAULT SHELL
 #-------------------------------------------------------------------------------
 change_shell() {
@@ -1038,7 +1206,7 @@ print_summary() {
     
     for step in "Hardware Detection" "Backup Configs" "OS Update" "Install Packages" \
                 "Oh-My-Zsh" "Zsh Plugins" "Powerlevel10k" "Nerd Fonts" \
-                "Generate .zshrc" "Generate .p10k.zsh" "Change Shell" "Optimizations"; do
+                "Generate .zshrc" "Generate .p10k.zsh" "Custom MOTD" "Change Shell" "Optimizations"; do
         local status="${STATUS[$step]:-N/A}"
         case $status in
             OK)   echo -e "  ${GREEN}✓${NC} $step" ;;
@@ -1069,6 +1237,7 @@ print_summary() {
     echo -e "${BOLD}FILES CREATED${NC}"
     echo "───────────────────────────────────────────────────────────"
     echo "  Config:   ~/.zshrc, ~/.p10k.zsh"
+    echo "  MOTD:     /etc/profile.d/99-echolume-motd.sh"
     echo "  Backups:  $BACKUP_DIR"
     echo "  Log:      $LOG_FILE"
     
@@ -1125,6 +1294,7 @@ BOOTSTRAP STATUS
   Tier:         $TIER
   Optimized:    $DO_OPTIMIZE
   OS Updated:   $DO_UPDATE_OS
+  MOTD:         $DO_MOTD
 
 DETECTED USB DEVICES
 $USB_DEVICE_LIST
@@ -1148,7 +1318,7 @@ main() {
     echo ""
     echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup              ║${NC}"
-    echo -e "${BOLD}${CYAN}║     by Echolume                                           ║${NC}"
+    echo -e "${BOLD}${CYAN}║     by Echolume · lab.hoens.fun                           ║${NC}"
     echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
@@ -1172,6 +1342,7 @@ main() {
     install_fonts
     generate_zshrc
     generate_p10k_config
+    install_motd
     change_shell
     apply_optimizations
     print_summary
