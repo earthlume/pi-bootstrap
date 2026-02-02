@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# pi-bootstrap.sh — Abe's ADHD-Friendly Pi Shell Setup
+# pi-bootstrap.sh — Echolume's ADHD-Friendly Pi Shell Setup
 # 
 # WHAT:  Installs zsh + oh-my-zsh + powerlevel10k with sane defaults
 # WHY:   Reduce cognitive load; make CLI accessible
@@ -671,7 +671,7 @@ change_shell() {
         return 0
     fi
     
-    # Detect if running non-interactively (piped)
+    # Detect if running non-interactively (piped install)
     if [[ ! -t 0 ]]; then
         warn "Non-interactive mode detected (piped install)"
         warn "Cannot change shell automatically — run this manually:"
@@ -748,8 +748,7 @@ ${YELLOW}⚠ NEXT STEPS${NC}
   1. ${BOLD}Log out and back in${NC} (or run: exec zsh)
   2. ${BOLD}Configure your terminal font${NC} to 'MesloLGS NF'
      (For SSH: configure your local terminal, not the Pi)
-  3. On first zsh launch, p10k wizard may run — you can skip it
-     (config is already generated)
+  3. To customize your prompt later, run: p10k configure
 
 ${CYAN}═══════════════════════════════════════════════════════════${NC}
 ${CYAN}  SYSTEM INFO — PASTE BACK TO CLAUDE IF NEEDED${NC}
