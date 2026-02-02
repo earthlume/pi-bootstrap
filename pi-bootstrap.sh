@@ -671,10 +671,24 @@ change_shell() {
         return 0
     fi
     
+    # Detect if running non-interactively (piped)
+    if [[ ! -t 0 ]]; then
+        warn "Non-interactive mode detected (piped install)"
+        warn "Cannot change shell automatically — run this manually:"
+        echo ""
+        echo -e "    ${BOLD}chsh -s $zsh_path${NC}"
+        echo ""
+        warn "Then log out and back in."
+        return 0
+    fi
+    
     log "Changing default shell to zsh..."
-    chsh -s "$zsh_path"
-    success "Default shell changed to zsh"
-    warn "Log out and back in (or reboot) for change to take effect"
+    if chsh -s "$zsh_path"; then
+        success "Default shell changed to zsh"
+        warn "Log out and back in (or reboot) for change to take effect"
+    else
+        error "chsh failed — run manually: chsh -s $zsh_path"
+    fi
 }
 
 #-------------------------------------------------------------------------------
