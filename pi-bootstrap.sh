@@ -1,7 +1,8 @@
 #!/bin/bash
 #===============================================================================
 # pi-bootstrap.sh — Echolume's ADHD-Friendly Pi Shell Setup
-# 
+# Version: 4
+#
 # WHAT:  Installs zsh + oh-my-zsh + powerlevel10k with sane defaults
 # WHY:   Reduce cognitive load; make CLI accessible
 # HOW:   Auto-detects hardware, picks FULL or LITE tier
@@ -11,7 +12,7 @@
 #
 # FLAGS:
 #   --optimize   Apply safe system tweaks (swappiness, journald limits)
-#   --update-os  Run full apt upgrade (safe OS update, no firmware)
+#   --update-os  Run apt upgrade (may include kernel/firmware packages)
 #   --no-chsh    Don't change default shell to zsh
 #   --info-only  Just print system info and exit (for pasting back to Cosmo)
 #   --no-motd    Skip MOTD installation
@@ -63,7 +64,7 @@ for arg in "$@"; do
             echo ""
             echo "Flags:"
             echo "  --optimize   Apply safe system tweaks (swappiness, journald)"
-            echo "  --update-os  Run full apt upgrade (no firmware updates)"
+            echo "  --update-os  Run apt upgrade (may include kernel/firmware packages)"
             echo "  --no-chsh    Don't change default shell to zsh"
             echo "  --no-motd    Don't install custom MOTD"
             echo "  --info-only  Just print system info and exit"
@@ -203,9 +204,10 @@ detect_extended_hardware() {
         THROTTLE_STATUS="vcgencmd not available"
     fi
     
-    # Camera detection
-    if [[ -d /dev/video0 ]] || ls /dev/video* &>/dev/null; then
-        CAMERA_DEVICES=$(ls /dev/video* 2>/dev/null | tr '\n' ' ' || echo "none")
+    # Camera detection (v4 fix: use compgen instead of -d on device node)
+    if compgen -G "/dev/video*" > /dev/null 2>&1; then
+        CAMERA_DEVICES=$(ls /dev/video* 2>/dev/null | tr '\n' ' ')
+        [[ -z "$CAMERA_DEVICES" ]] && CAMERA_DEVICES="none detected"
     else
         CAMERA_DEVICES="none detected"
     fi
@@ -951,6 +953,7 @@ install_motd() {
 #===============================================================================
 # Echolume's Fun Homelab — Dynamic MOTD
 # lab.hoens.fun
+# Version: 4 (hardened)
 #===============================================================================
 
 # Colors
@@ -991,6 +994,9 @@ TAGLINES=(
 
 # Pick random tagline
 TAGLINE="${TAGLINES[$RANDOM % ${#TAGLINES[@]}]}"
+
+# Safe padding helper: prevents negative widths -> printf errors (v4 fix)
+pad() { local n="$1"; (( n < 0 )) && n=0; printf '%*s' "$n" ''; }
 
 # Gather system info
 HOSTNAME_UPPER=$(hostname | tr '[:lower:]' '[:upper:]')
@@ -1042,9 +1048,11 @@ DISK_STR="${DISK_COLOR}${DISK_INFO}${C_RESET}"
 
 # IP address
 IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "unknown")
-# Get interface name
+
+# Get interface name (v4 fix: use awk instead of grep -oP for portability)
 if command -v ip &>/dev/null; then
-    NET_IF=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' | head -1 || echo "eth0")
+    NET_IF=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)
+    [[ -z "$NET_IF" ]] && NET_IF="eth0"
 else
     NET_IF="eth0"
 fi
@@ -1056,18 +1064,18 @@ else
     PI_MODEL="Linux"
 fi
 
-# Print the MOTD
+# Print the MOTD (v4 fix: use pad() to prevent negative printf widths)
 echo ""
 echo -e "${C_CYAN}╭─────────────────────────────────────────────────────────────────╮${C_RESET}"
-echo -e "${C_CYAN}│${C_RESET}   ${C_BOLD}${C_MAGENTA}█▀▀ ${HOSTNAME_UPPER}${C_RESET}$(printf '%*s' $((43 - ${#HOSTNAME_UPPER})) '')${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}lab.hoens.fun${C_RESET}       ${C_DIM}\"${TAGLINE}\"${C_RESET}$(printf '%*s' $((30 - ${#TAGLINE})) '')${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_BOLD}${C_MAGENTA}█▀▀ ${HOSTNAME_UPPER}${C_RESET}$(pad $((43 - ${#HOSTNAME_UPPER})))${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}lab.hoens.fun${C_RESET}       ${C_DIM}\"${TAGLINE}\"${C_RESET}$(pad $((30 - ${#TAGLINE})))${C_CYAN}│${C_RESET}"
 echo -e "${C_CYAN}├─────────────────────────────────────────────────────────────────┤${C_RESET}"
-echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Model${C_RESET}   ${PI_MODEL}$(printf '%*s' $((52 - ${#PI_MODEL})) '')${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Uptime${C_RESET}  ${UPTIME_STR}$(printf '%*s' $((52 - ${#UPTIME_STR})) '')${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Temp${C_RESET}    ${TEMP_STR}$(printf '%*s' $((43)) '')${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}CPU${C_RESET}     ${CPU_USAGE}%          ${C_DIM}RAM${C_RESET}  ${RAM_STR}$(printf '%*s' $((22)) '')${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Disk${C_RESET}    ${DISK_STR}$(printf '%*s' $((37)) '')${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}IP${C_RESET}      ${IP_ADDR} ${C_DIM}(${NET_IF})${C_RESET}$(printf '%*s' $((42 - ${#IP_ADDR} - ${#NET_IF})) '')${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Model${C_RESET}   ${PI_MODEL}$(pad $((52 - ${#PI_MODEL})))${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Uptime${C_RESET}  ${UPTIME_STR}$(pad $((52 - ${#UPTIME_STR})))${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Temp${C_RESET}    ${TEMP_STR}$(pad 43)${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}CPU${C_RESET}     ${CPU_USAGE}%          ${C_DIM}RAM${C_RESET}  ${RAM_STR}$(pad 22)${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Disk${C_RESET}    ${DISK_STR}$(pad 37)${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}IP${C_RESET}      ${IP_ADDR} ${C_DIM}(${NET_IF})${C_RESET}$(pad $((42 - ${#IP_ADDR} - ${#NET_IF})))${C_CYAN}│${C_RESET}"
 echo -e "${C_CYAN}├─────────────────────────────────────────────────────────────────┤${C_RESET}"
 echo -e "${C_CYAN}│${C_RESET}   ${C_DIM}Quick:${C_RESET} temp · update · ports · htop · duf                    ${C_CYAN}│${C_RESET}"
 echo -e "${C_CYAN}╰─────────────────────────────────────────────────────────────────╯${C_RESET}"
@@ -1084,10 +1092,19 @@ MOTD_SCRIPT
     fi
     
     # Disable last login message (we have our own now)
-    if [[ -f /etc/ssh/sshd_config ]]; then
+    # v4 fix: Prefer sshd_config.d drop-in to avoid duplicating lines in sshd_config
+    if [[ -d /etc/ssh/sshd_config.d ]]; then
+        log "Disabling SSH last login message (drop-in)..."
+        printf "PrintLastLog no\n" | sudo tee /etc/ssh/sshd_config.d/99-echolume.conf >/dev/null
+    elif [[ -f /etc/ssh/sshd_config ]]; then
         if ! grep -q "^PrintLastLog no" /etc/ssh/sshd_config; then
             log "Disabling SSH last login message..."
-            echo "PrintLastLog no" | sudo tee -a /etc/ssh/sshd_config > /dev/null
+            # Replace existing setting if present; otherwise append once
+            if grep -qE '^\s*#?\s*PrintLastLog\b' /etc/ssh/sshd_config; then
+                sudo sed -i -E 's/^\s*#?\s*PrintLastLog\b.*/PrintLastLog no/' /etc/ssh/sshd_config
+            else
+                echo "PrintLastLog no" | sudo tee -a /etc/ssh/sshd_config >/dev/null
+            fi
         fi
     fi
     
@@ -1167,19 +1184,19 @@ apply_optimizations() {
     fi
     
     # Limit journal size (saves SD card writes)
-    if [[ -f /etc/systemd/journald.conf ]]; then
-        if ! grep -q "^SystemMaxUse=50M" /etc/systemd/journald.conf; then
-            log "Limiting journald to 50MB..."
-            if sudo sed -i 's/^#SystemMaxUse=.*/SystemMaxUse=50M/' /etc/systemd/journald.conf && \
-               sudo sed -i 's/^SystemMaxUse=.*/SystemMaxUse=50M/' /etc/systemd/journald.conf; then
-                sudo systemctl restart systemd-journald 2>/dev/null
-                success "Journald limited"
-            else
-                error "Failed to configure journald"
-                ((opt_failures++)) || true
-            fi
+    # v4 fix: Use drop-in config instead of editing main journald.conf
+    local jdrop="/etc/systemd/journald.conf.d/99-echolume-limit.conf"
+    if [[ -f "$jdrop" ]] && grep -qE '^\s*SystemMaxUse\s*=\s*50M\s*$' "$jdrop" 2>/dev/null; then
+        success "Journald already limited (drop-in present)"
+    else
+        log "Limiting journald to 50MB (drop-in: $jdrop)..."
+        if sudo mkdir -p /etc/systemd/journald.conf.d && \
+           printf "[Journal]\nSystemMaxUse=50M\n" | sudo tee "$jdrop" >/dev/null; then
+            sudo systemctl restart systemd-journald 2>/dev/null || true
+            success "Journald limited"
         else
-            success "Journald already limited"
+            error "Failed to configure journald"
+            ((opt_failures++)) || true
         fi
     fi
     
@@ -1317,13 +1334,13 @@ EOF
 main() {
     echo ""
     echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup              ║${NC}"
+    echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup  (v4)        ║${NC}"
     echo -e "${BOLD}${CYAN}║     by Echolume · lab.hoens.fun                           ║${NC}"
     echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
     # Initialize log
-    echo "=== pi-bootstrap.sh started $(date -Iseconds) ===" > "$LOG_FILE"
+    echo "=== pi-bootstrap.sh v4 started $(date -Iseconds) ===" > "$LOG_FILE"
     
     # Info-only mode
     if [[ "$INFO_ONLY" == true ]]; then
