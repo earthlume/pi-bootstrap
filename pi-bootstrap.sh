@@ -1,7 +1,7 @@
 #!/bin/bash
 #===============================================================================
 # pi-bootstrap.sh — Echolume's ADHD-Friendly Pi Shell Setup
-# Version: 7
+# Version: 9
 #
 # WHAT:  Installs zsh + oh-my-zsh + powerlevel10k with sane defaults
 # WHY:   Reduce cognitive load; make CLI accessible
@@ -185,7 +185,10 @@ detect_system() {
 # EXTENDED HARDWARE DETECTION (for summary)
 #-------------------------------------------------------------------------------
 detect_extended_hardware() {
+    log "Gathering system info for summary..."
+    
     # CPU info
+    log "  → CPU info..."
     CPU_CORES=$(nproc 2>/dev/null || echo "?")
     CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo "ARM")
     
@@ -198,6 +201,7 @@ detect_extended_hardware() {
     fi
     
     # Throttling status (Pi-specific)
+    log "  → Throttle status..."
     if command -v vcgencmd &>/dev/null; then
         THROTTLE_STATUS=$(timeout 3 vcgencmd get_throttled 2>/dev/null | cut -d= -f2 || echo "N/A")
     else
@@ -205,6 +209,7 @@ detect_extended_hardware() {
     fi
     
     # Camera detection (v4 fix: use compgen instead of -d on device node)
+    log "  → Camera detection..."
     if compgen -G "/dev/video*" > /dev/null 2>&1; then
         CAMERA_DEVICES=$(ls /dev/video* 2>/dev/null | tr '\n' ' ')
         [[ -z "$CAMERA_DEVICES" ]] && CAMERA_DEVICES="none detected"
@@ -220,6 +225,7 @@ detect_extended_hardware() {
     fi
     
     # I2C status (with timeout to prevent hang)
+    log "  → I2C status..."
     if [[ -e /dev/i2c-1 ]]; then
         I2C_STATUS="enabled"
         if command -v i2cdetect &>/dev/null; then
@@ -248,6 +254,7 @@ detect_extended_hardware() {
     fi
     
     # USB devices (with timeout)
+    log "  → USB devices..."
     if command -v lsusb &>/dev/null; then
         USB_DEVICES=$(timeout 5 lsusb 2>/dev/null | wc -l || echo "0")
         USB_DEVICE_LIST=$(timeout 5 lsusb 2>/dev/null | grep -vi "hub" | head -5 || echo "none")
@@ -256,17 +263,19 @@ detect_extended_hardware() {
         USB_DEVICE_LIST=""
     fi
     
-    # Network interfaces
-    NET_INTERFACES=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -v lo | tr '\n' ' ' || echo "unknown")
+    # Network interfaces (with timeout)
+    log "  → Network interfaces..."
+    NET_INTERFACES=$(timeout 3 ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -v lo | tr '\n' ' ' || echo "unknown")
     
     # WiFi status
     if command -v iwconfig &>/dev/null; then
         WIFI_INTERFACE=$(timeout 3 iwconfig 2>/dev/null | grep -o "^wlan[0-9]" | head -1 || echo "none")
     else
-        WIFI_INTERFACE=$(ip link show 2>/dev/null | grep -o "wlan[0-9]" | head -1 || echo "none")
+        WIFI_INTERFACE=$(timeout 3 ip link show 2>/dev/null | grep -o "wlan[0-9]" | head -1 || echo "none")
     fi
     
     # Bluetooth
+    log "  → Bluetooth..."
     if command -v bluetoothctl &>/dev/null; then
         BT_STATUS="available"
     elif [[ -d /sys/class/bluetooth ]]; then
@@ -276,6 +285,7 @@ detect_extended_hardware() {
     fi
     
     # Boot config location (varies by OS version)
+    log "  → Boot config..."
     if [[ -f /boot/firmware/config.txt ]]; then
         BOOT_CONFIG="/boot/firmware/config.txt"
     elif [[ -f /boot/config.txt ]]; then
@@ -291,6 +301,8 @@ detect_extended_hardware() {
     else
         BOOT_OVERLAYS="unknown"
     fi
+    
+    log "  → Done gathering info"
 }
 
 #-------------------------------------------------------------------------------
@@ -960,7 +972,7 @@ install_motd() {
 #===============================================================================
 # Echolume's Fun Homelab — Dynamic MOTD
 # lab.hoens.fun
-# Version: 7 (with OS info)
+# Version: 9 (with timeouts)
 #===============================================================================
 
 # Colors
@@ -1100,10 +1112,10 @@ else
 fi
 DISK_STR="${DISK_COLOR}${DISK_PCT}%${C_RESET}"
 
-# IP address and interface
-IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "unknown")
+# IP address and interface (with timeouts to prevent hang)
+IP_ADDR=$(timeout 2 hostname -I 2>/dev/null | awk '{print $1}' || echo "unknown")
 if command -v ip &>/dev/null; then
-    NET_IF=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)
+    NET_IF=$(timeout 2 ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}' || true)
     [[ -z "$NET_IF" ]] && NET_IF="eth0"
 else
     NET_IF="eth0"
@@ -1267,7 +1279,8 @@ apply_optimizations() {
 # FINAL SUMMARY WITH STATUS REPORT
 #-------------------------------------------------------------------------------
 print_summary() {
-    detect_extended_hardware
+    # NOTE: We intentionally do NOT call detect_extended_hardware() here
+    # to avoid hangs on slow devices. Use --info-only for full diagnostics.
     
     header "BOOTSTRAP COMPLETE"
     
@@ -1302,85 +1315,28 @@ print_summary() {
     echo "  1. Run: chsh -s $(which zsh)  (if not done automatically)"
     echo "  2. Log out and back in (or run: exec zsh)"
     echo "  3. Configure your terminal font to 'MesloLGS NF'"
-    echo "  4. To customize prompt: p10k configure"
+    echo ""
     
     # File locations
-    echo ""
     echo -e "${BOLD}FILES CREATED${NC}"
     echo "───────────────────────────────────────────────────────────"
     echo "  Config:   ~/.zshrc, ~/.p10k.zsh"
     echo "  MOTD:     /etc/profile.d/99-echolume-motd.sh"
     echo "  Backups:  $BACKUP_DIR"
     echo "  Log:      $LOG_FILE"
-    
-    # System profile
     echo ""
-    echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════${NC}"
-    echo -e "${BOLD}${CYAN}  SYSTEM PROFILE — PASTE TO COSMO FOR FURTHER SETUP${NC}"
-    echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════${NC}"
     
-    cat <<EOF
-
-\`\`\`
-BOOTSTRAP REPORT — $(date -Iseconds)
-════════════════════════════════════════════════════════════
-
-HARDWARE
-  Model:        $PI_MODEL
-  Architecture: $ARCH ($BITS-bit)
-  CPU:          $CPU_CORES cores
-  RAM:          ${RAM_MB} MB
-  Temperature:  ${TEMP_C}°C
-  Throttle:     $THROTTLE_STATUS
-  Tier:         $TIER
-
-STORAGE
-  Total:        $ROOT_SIZE
-  Available:    $ROOT_AVAIL
-  Used:         $ROOT_USED_PCT
-
-SOFTWARE
-  OS:           $OS_NAME
-  Kernel:       $KERNEL
-  Hostname:     $(hostname)
-  User:         $(whoami)
-  Shell:        $SHELL → $(which zsh)
-
-INTERFACES
-  I2C:          $I2C_STATUS
-  SPI:          $SPI_STATUS
-  GPIO:         $GPIO_STATUS
-  PCIe:         $HAS_PCIE
-  WiFi:         $WIFI_INTERFACE
-  Bluetooth:    $BT_STATUS
-  Network:      $NET_INTERFACES
-
-PERIPHERALS
-  Camera:       $CAMERA_DEVICES
-  Libcamera:    $LIBCAMERA
-  USB devices:  $USB_DEVICES
-  Overlays:     $BOOT_OVERLAYS
-
-BOOTSTRAP STATUS
-  Failures:     $FAILURES
-  Tier:         $TIER
-  Optimized:    $DO_OPTIMIZE
-  OS Updated:   $DO_UPDATE_OS
-  MOTD:         $DO_MOTD
-
-DETECTED USB DEVICES
-$USB_DEVICE_LIST
-
-SUGGESTED NEXT STEPS FOR COSMO
-  • Project type: [DESCRIBE YOUR PROJECT HERE]
-  • Need camera? $( [[ "$CAMERA_DEVICES" == "none detected" ]] && echo "Yes - need to enable/configure" || echo "Detected: $CAMERA_DEVICES" )
-  • Need I2C?    $( [[ "$I2C_STATUS" == "disabled" ]] && echo "Yes - run: sudo raspi-config" || echo "Already enabled" )
-  • Need SPI?    $( [[ "$SPI_STATUS" == "disabled" ]] && echo "Yes - run: sudo raspi-config" || echo "Already enabled" )
-
-════════════════════════════════════════════════════════════
-\`\`\`
-
-EOF
+    # Quick system summary (using data already collected in detect_system)
+    echo -e "${BOLD}SYSTEM${NC}"
+    echo "───────────────────────────────────────────────────────────"
+    echo "  Model:    $PI_MODEL"
+    echo "  OS:       $OS_NAME"
+    echo "  RAM:      ${RAM_MB} MB"
+    echo "  Tier:     $TIER"
+    echo ""
+    
+    echo -e "${DIM}For full hardware diagnostics: bash pi-bootstrap.sh --info-only${NC}"
+    echo ""
 }
 
 #-------------------------------------------------------------------------------
@@ -1389,13 +1345,13 @@ EOF
 main() {
     echo ""
     echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup  (v7)        ║${NC}"
+    echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup  (v9)        ║${NC}"
     echo -e "${BOLD}${CYAN}║     by Echolume · lab.hoens.fun                           ║${NC}"
     echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
     # Initialize log
-    echo "=== pi-bootstrap.sh v7 started $(date -Iseconds) ===" > "$LOG_FILE"
+    echo "=== pi-bootstrap.sh v9 started $(date -Iseconds) ===" > "$LOG_FILE"
     
     # Info-only mode
     if [[ "$INFO_ONLY" == true ]]; then
