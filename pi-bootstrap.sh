@@ -1,7 +1,7 @@
 #!/bin/bash
 #===============================================================================
 # pi-bootstrap.sh — Echolume's ADHD-Friendly Pi Shell Setup
-# Version: 14
+# Version: 15
 #
 # WHAT:  Installs zsh + oh-my-zsh + powerlevel10k with sane defaults
 # WHY:   Reduce cognitive load; make CLI accessible
@@ -71,6 +71,7 @@ for arg in "$@"; do
             echo "  --info-only  Just print system info and exit"
             exit 0
             ;;
+        *) echo -e "${YELLOW}⚠ Unknown flag: $arg${NC}" >&2 ;;
     esac
 done
 
@@ -135,11 +136,10 @@ detect_system() {
     RAM_MB=$((RAM_KB / 1024))
     log "RAM: ${RAM_MB} MB"
     
-    # OS Info
+    # OS Info (subshells avoid polluting global namespace)
     if [[ -f /etc/os-release ]]; then
-        source /etc/os-release
-        OS_NAME="${PRETTY_NAME:-Unknown}"
-        OS_VERSION_ID="${VERSION_ID:-unknown}"
+        OS_NAME=$(. /etc/os-release && echo "${PRETTY_NAME:-Unknown}")
+        OS_VERSION_ID=$(. /etc/os-release && echo "${VERSION_ID:-unknown}")
     else
         OS_NAME="Unknown"
         OS_VERSION_ID="unknown"
@@ -158,10 +158,8 @@ detect_system() {
     fi
     log "Bits: $BITS"
     
-    # Storage
-    ROOT_SIZE=$(df -h / | awk 'NR==2 {print $2}')
-    ROOT_AVAIL=$(df -h / | awk 'NR==2 {print $4}')
-    ROOT_USED_PCT=$(df -h / | awk 'NR==2 {print $5}')
+    # Storage (single df call instead of three)
+    read -r ROOT_SIZE ROOT_AVAIL ROOT_USED_PCT <<< "$(df -h / | awk 'NR==2 {print $2, $4, $5}')"
     log "Root filesystem: $ROOT_SIZE total, $ROOT_AVAIL available ($ROOT_USED_PCT used)"
     
     # Decide tier
@@ -174,7 +172,7 @@ detect_system() {
     
     # Check for special hardware
     HAS_PCIE=false
-    if [[ -d /sys/bus/pci/devices ]] && ls /sys/bus/pci/devices/ 2>/dev/null | grep -q .; then
+    if compgen -G "/sys/bus/pci/devices/*" >/dev/null 2>&1; then
         HAS_PCIE=true
     fi
     log "PCIe detected: $HAS_PCIE"
@@ -371,7 +369,7 @@ $USB_DEVICE_LIST
 EOF
     
     # Additional info if Pi 5
-    if echo "$PI_MODEL" | grep -qi "pi 5"; then
+    if [[ "${PI_MODEL,,}" =~ pi\ 5 ]]; then
         echo "--- Pi 5 Specific ---"
         if [[ -f "$BOOT_CONFIG" ]]; then
             echo "PCIe config:"
@@ -603,7 +601,7 @@ install_fonts() {
     local font_failures=0
     
     for font in "${fonts[@]}"; do
-        local decoded_font=$(echo "$font" | sed 's/%20/ /g')
+        local decoded_font="${font//%20/ }"
         if [[ ! -f "$font_dir/$decoded_font" ]]; then
             log "Downloading: $decoded_font"
             if ! curl -fsSL -o "$font_dir/$decoded_font" "$base_url/$font"; then
@@ -973,7 +971,7 @@ install_motd() {
 #===============================================================================
 # Echolume's Fun Homelab — Dynamic MOTD
 # lab.hoens.fun
-# Version: 14
+# Version: 15
 #===============================================================================
 
 # Colors
@@ -1057,7 +1055,8 @@ boxline2() {
 
 # Gather system info
 HOSTNAME_UPPER=$(hostname | tr '[:lower:]' '[:upper:]')
-UPTIME_STR=$(uptime -p 2>/dev/null | sed 's/up /Up /' || echo "Up ?")
+UPTIME_STR=$(uptime -p 2>/dev/null) || UPTIME_STR="Up ?"
+UPTIME_STR="${UPTIME_STR/up /Up }"
 
 # Model (short version)
 if [[ -f /proc/device-tree/model ]]; then
@@ -1099,7 +1098,7 @@ CPU_PCT=$(timeout 2 top -bn1 2>/dev/null | awk '/Cpu\(s\)/{print int($2)}')
 [[ -z "$CPU_PCT" ]] && CPU_PCT="?"
 
 # RAM with color
-read -r RAM_USED RAM_TOTAL <<< $(free -m | awk '/^Mem:/{print $3, $2}')
+read -r RAM_USED RAM_TOTAL <<< "$(free -m | awk '/^Mem:/{print $3, $2}')"
 RAM_PCT=$((RAM_USED * 100 / RAM_TOTAL))
 if (( RAM_PCT < 70 )); then
     RAM_COLOR="${C_GREEN}"
@@ -1110,7 +1109,7 @@ else
 fi
 
 # Disk with color
-read -r DISK_USED DISK_TOTAL DISK_PCT <<< $(df -h / | awk 'NR==2{gsub(/%/,"",$5); print $3, $2, $5}')
+read -r DISK_USED DISK_TOTAL DISK_PCT <<< "$(df -h / | awk 'NR==2{gsub(/%/,"",$5); print $3, $2, $5}')"
 if (( DISK_PCT < 70 )); then
     DISK_COLOR="${C_GREEN}"
 elif (( DISK_PCT < 85 )); then
@@ -1198,7 +1197,8 @@ change_shell() {
         return 0
     fi
     
-    local zsh_path=$(which zsh)
+    local zsh_path
+    zsh_path=$(command -v zsh)
     
     if [[ "$SHELL" == "$zsh_path" ]]; then
         success "zsh is already default shell"
@@ -1319,7 +1319,7 @@ print_summary() {
     echo ""
     echo -e "${BOLD}NEXT STEPS${NC}"
     echo "───────────────────────────────────────────────────────────"
-    echo "  1. Run: chsh -s $(which zsh)  (if not done automatically)"
+    echo "  1. Run: chsh -s $(command -v zsh)  (if not done automatically)"
     echo "  2. Log out and back in (or run: exec zsh)"
     echo "  3. Configure your terminal font to 'MesloLGS NF'"
     echo ""
@@ -1352,13 +1352,13 @@ print_summary() {
 main() {
     echo ""
     echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup  (v14)       ║${NC}"
+    echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup  (v15)       ║${NC}"
     echo -e "${BOLD}${CYAN}║     by Echolume · lab.hoens.fun                           ║${NC}"
     echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
     # Initialize log
-    echo "=== pi-bootstrap.sh v14 started $(date -Iseconds) ===" > "$LOG_FILE"
+    echo "=== pi-bootstrap.sh v15 started $(date -Iseconds) ===" > "$LOG_FILE"
     
     # Info-only mode
     if [[ "$INFO_ONLY" == true ]]; then
