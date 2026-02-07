@@ -657,6 +657,9 @@ export ZSH="$HOME/.oh-my-zsh"
 # Theme: powerlevel10k
 ZSH_THEME="powerlevel10k/powerlevel10k"
 
+# Prevent p10k wizard from overriding our config
+POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD=true
+
 # Enable instant prompt (faster startup) — must come after MOTD
 if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
   source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
