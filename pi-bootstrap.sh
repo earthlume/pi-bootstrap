@@ -1,7 +1,7 @@
 #!/bin/bash
 #===============================================================================
 # pi-bootstrap.sh — Echolume's ADHD-Friendly Pi Shell Setup
-# Version: 17
+# Version: 18
 #
 # WHAT:  Installs zsh + oh-my-zsh + powerlevel10k with sane defaults
 # WHY:   Reduce cognitive load; make CLI accessible
@@ -219,6 +219,15 @@ detect_system() {
         HAS_PCIE=true
     fi
     log "PCIe detected: $HAS_PCIE"
+
+    # Boot config location (needed for PCIe Gen 3 optimization)
+    if [[ -f /boot/firmware/config.txt ]]; then
+        BOOT_CONFIG="/boot/firmware/config.txt"
+    elif [[ -f /boot/config.txt ]]; then
+        BOOT_CONFIG="/boot/config.txt"
+    else
+        BOOT_CONFIG=""
+    fi
     
     track_status "Hardware Detection" "OK"
 }
@@ -831,37 +840,37 @@ alias gp='git pull'
 #        aliases add <name> <command>  — add a custom alias
 #        aliases remove <name>         — remove a custom alias
 #        aliases help          — show usage
-CUSTOM_ALIAS_FILE="\$HOME/.zsh_custom_aliases"
-[[ -f "\$CUSTOM_ALIAS_FILE" ]] && source "\$CUSTOM_ALIAS_FILE"
+CUSTOM_ALIAS_FILE="$HOME/.zsh_custom_aliases"
+[[ -f "$CUSTOM_ALIAS_FILE" ]] && source "$CUSTOM_ALIAS_FILE"
 
 aliases() {
     local C_R='\033[0m' C_B='\033[1m' C_D='\033[2m' C_C='\033[0;36m' C_G='\033[0;32m' C_Y='\033[1;33m' C_W='\033[1;37m' C_RED='\033[0;31m'
-    local subcmd="\${1:-}"
+    local subcmd="${1:-}"
 
     _aliases_header() {
-        printf "\${C_C}╭────────────────────────────────────────────────────────╮\${C_R}\n"
-        printf "\${C_C}│\${C_R} \${C_B}\${C_W}Pi-Bootstrap Alias Manager\${C_R}                             \${C_C}│\${C_R}\n"
-        printf "\${C_C}├────────────────────────────────────────────────────────┤\${C_R}\n"
+        printf "${C_C}╭────────────────────────────────────────────────────────╮${C_R}\n"
+        printf "${C_C}│${C_R} ${C_B}${C_W}Pi-Bootstrap Alias Manager${C_R}                             ${C_C}│${C_R}\n"
+        printf "${C_C}├────────────────────────────────────────────────────────┤${C_R}\n"
     }
     _aliases_footer() {
-        printf "\${C_C}╰────────────────────────────────────────────────────────╯\${C_R}\n"
+        printf "${C_C}╰────────────────────────────────────────────────────────╯${C_R}\n"
     }
     _aliases_section() {
-        printf "\${C_C}│\${C_R}                                                        \${C_C}│\${C_R}\n"
-        printf "\${C_C}│\${C_R} \${C_B}\${C_Y}%s\${C_R}%*s\${C_C}│\${C_R}\n" "\$1" \$((55 - \${#1})) ""
-        printf "\${C_C}│\${C_R} \${C_D}%s\${C_R}%*s\${C_C}│\${C_R}\n" "────────────────────────────────────────────────────" 1 ""
+        printf "${C_C}│${C_R}                                                        ${C_C}│${C_R}\n"
+        printf "${C_C}│${C_R} ${C_B}${C_Y}%s${C_R}%*s${C_C}│${C_R}\n" "$1" $((55 - ${#1})) ""
+        printf "${C_C}│${C_R} ${C_D}%s${C_R}%*s${C_C}│${C_R}\n" "────────────────────────────────────────────────────" 1 ""
     }
     _aliases_row() {
-        local name="\$1" desc="\$2"
+        local name="$1" desc="$2"
         local padname=12
-        local padded=\$(printf "%-\${padname}s" "\$name")
-        local total=\$(( \${#padded} + \${#desc} ))
-        local gap=\$((54 - total))
+        local padded=$(printf "%-${padname}s" "$name")
+        local total=$(( ${#padded} + ${#desc} ))
+        local gap=$((54 - total))
         (( gap < 0 )) && gap=0
-        printf "\${C_C}│\${C_R}  \${C_G}%-\${padname}s\${C_R} \${C_D}%s\${C_R}%*s\${C_C}│\${C_R}\n" "\$name" "\$desc" "\$gap" ""
+        printf "${C_C}│${C_R}  ${C_G}%-${padname}s${C_R} ${C_D}%s${C_R}%*s${C_C}│${C_R}\n" "$name" "$desc" "$gap" ""
     }
 
-    case "\$subcmd" in
+    case "$subcmd" in
         help|-h|--help)
             _aliases_header
             _aliases_section "Usage"
@@ -873,45 +882,45 @@ aliases() {
             _aliases_footer
             ;;
         search)
-            local query="\${2:-}"
-            if [[ -z "\$query" ]]; then
+            local query="${2:-}"
+            if [[ -z "$query" ]]; then
                 echo "Usage: aliases search <keyword>"
                 return 1
             fi
             _aliases_header
-            _aliases_section "Search: \$query"
-            alias | grep -i "\$query" | while IFS= read -r line; do
-                local aname="\${line%%=*}"
-                local acmd="\${line#*=}"
-                acmd="\${acmd#[\\'\\"]}"
-                acmd="\${acmd%[\\'\\"]}"
-                [[ \${#acmd} -gt 38 ]] && acmd="\${acmd:0:35}..."
-                _aliases_row "\$aname" "\$acmd"
+            _aliases_section "Search: $query"
+            alias | grep -i "$query" | while IFS= read -r line; do
+                local aname="${line%%=*}"
+                local acmd="${line#*=}"
+                acmd="${acmd#\'}"
+                acmd="${acmd%\'}"
+                [[ ${#acmd} -gt 38 ]] && acmd="${acmd:0:35}..."
+                _aliases_row "$aname" "$acmd"
             done
             _aliases_footer
             ;;
         add)
-            local aname="\${2:-}" acmd="\${*:3}"
-            if [[ -z "\$aname" || -z "\$acmd" ]]; then
+            local aname="${2:-}" acmd="${*:3}"
+            if [[ -z "$aname" || -z "$acmd" ]]; then
                 echo "Usage: aliases add <name> <command>"
                 return 1
             fi
-            echo "alias \$aname='\$acmd'" >> "\$CUSTOM_ALIAS_FILE"
-            eval "alias \$aname='\$acmd'"
-            printf "\${C_G}✓\${C_R} Alias \${C_B}%s\${C_R} → %s  \${C_D}(saved to %s)\${C_R}\n" "\$aname" "\$acmd" "\$CUSTOM_ALIAS_FILE"
+            echo "alias $aname='$acmd'" >> "$CUSTOM_ALIAS_FILE"
+            eval "alias $aname='$acmd'"
+            printf "${C_G}✓${C_R} Alias ${C_B}%s${C_R} → %s  ${C_D}(saved to %s)${C_R}\n" "$aname" "$acmd" "$CUSTOM_ALIAS_FILE"
             ;;
         remove|rm)
-            local aname="\${2:-}"
-            if [[ -z "\$aname" ]]; then
+            local aname="${2:-}"
+            if [[ -z "$aname" ]]; then
                 echo "Usage: aliases remove <name>"
                 return 1
             fi
-            if [[ -f "\$CUSTOM_ALIAS_FILE" ]] && grep -q "^alias \$aname=" "\$CUSTOM_ALIAS_FILE"; then
-                sed -i "/^alias \$aname=/d" "\$CUSTOM_ALIAS_FILE"
-                unalias "\$aname" 2>/dev/null
-                printf "\${C_RED}✗\${C_R} Alias \${C_B}%s\${C_R} removed  \${C_D}(updated %s)\${C_R}\n" "\$aname" "\$CUSTOM_ALIAS_FILE"
+            if [[ -f "$CUSTOM_ALIAS_FILE" ]] && grep -q "^alias $aname=" "$CUSTOM_ALIAS_FILE"; then
+                sed -i "/^alias $aname=/d" "$CUSTOM_ALIAS_FILE"
+                unalias "$aname" 2>/dev/null
+                printf "${C_RED}✗${C_R} Alias ${C_B}%s${C_R} removed  ${C_D}(updated %s)${C_R}\n" "$aname" "$CUSTOM_ALIAS_FILE"
             else
-                echo "Alias '\$aname' not found in custom aliases."
+                echo "Alias '$aname' not found in custom aliases."
                 echo "Note: built-in aliases from .zshrc cannot be removed here."
                 return 1
             fi
@@ -953,23 +962,230 @@ aliases() {
             _aliases_row "gd" "git diff"
             _aliases_row "gl" "git log (last 20)"
             _aliases_row "gp" "git pull"
+            _aliases_section "ADHD Tools"
+            _aliases_row "whereami" "context: dir + git + recent cmds"
+            _aliases_row "today" "what did I do today?"
+            _aliases_row "trash" "<file> — safe delete with undo"
+            _aliases_row "trash list" "show trashed files"
+            _aliases_row "trash restore" "<n> — bring file back"
+            _aliases_row "aliases" "this cheat sheet"
 
             # Show custom aliases if any exist
-            if [[ -f "\$CUSTOM_ALIAS_FILE" ]] && [[ -s "\$CUSTOM_ALIAS_FILE" ]]; then
+            if [[ -f "$CUSTOM_ALIAS_FILE" ]] && [[ -s "$CUSTOM_ALIAS_FILE" ]]; then
                 _aliases_section "Custom (~/.zsh_custom_aliases)"
                 while IFS= read -r line; do
-                    [[ "\$line" =~ ^alias\\ (.+)=\\'(.+)\\'$ ]] || [[ "\$line" =~ ^alias\\ (.+)=\\"(.+)\\"$ ]] || continue
-                    local cname="\${match[1]}" ccmd="\${match[2]}"
-                    [[ \${#ccmd} -gt 38 ]] && ccmd="\${ccmd:0:35}..."
-                    _aliases_row "\$cname" "\$ccmd"
-                done < "\$CUSTOM_ALIAS_FILE"
+                    if [[ "$line" =~ ^alias\ ([^=]+)=\'(.+)\'$ ]]; then
+                        local cname="${match[1]}" ccmd="${match[2]}"
+                        [[ ${#ccmd} -gt 38 ]] && ccmd="${ccmd:0:35}..."
+                        _aliases_row "$cname" "$ccmd"
+                    fi
+                done < "$CUSTOM_ALIAS_FILE"
             fi
 
-            printf "\${C_C}│\${C_R}                                                        \${C_C}│\${C_R}\n"
-            printf "\${C_C}│\${C_R} \${C_D}Type \${C_C}aliases help\${C_D} for add/remove/search commands\${C_R}       \${C_C}│\${C_R}\n"
+            printf "${C_C}│${C_R}                                                        ${C_C}│${C_R}\n"
+            printf "${C_C}│${C_R} ${C_D}Type ${C_C}aliases help${C_D} for add/remove/search commands${C_R}       ${C_C}│${C_R}\n"
             _aliases_footer
             ;;
     esac
+}
+
+#-------------------------------------------------------------------------------
+# AUTO-LS AFTER CD (immediate spatial awareness)
+#-------------------------------------------------------------------------------
+autoload -Uz add-zsh-hook
+__auto_ls() { ls --color=auto; }
+add-zsh-hook chpwd __auto_ls
+
+#-------------------------------------------------------------------------------
+# COLORED MAN PAGES (scannable, not a wall of monochrome text)
+#-------------------------------------------------------------------------------
+export LESS_TERMCAP_mb=$'\e[1;31m'     # begin bold
+export LESS_TERMCAP_md=$'\e[1;36m'     # begin blink — cyan headings
+export LESS_TERMCAP_me=$'\e[0m'        # end bold/blink
+export LESS_TERMCAP_so=$'\e[1;33;44m'  # begin standout — yellow on blue
+export LESS_TERMCAP_se=$'\e[0m'        # end standout
+export LESS_TERMCAP_us=$'\e[1;32m'     # begin underline — green
+export LESS_TERMCAP_ue=$'\e[0m'        # end underline
+
+#-------------------------------------------------------------------------------
+# LONG-COMMAND NOTIFICATION (bell after 10s+ commands)
+#   Terminal will flash/bounce when you've tabbed away
+#-------------------------------------------------------------------------------
+__cmd_timer_preexec() { __cmd_start=$SECONDS; }
+__cmd_timer_precmd() {
+    if (( ${__cmd_start:-0} > 0 )); then
+        local elapsed=$(( SECONDS - __cmd_start ))
+        if (( elapsed >= 10 )); then
+            printf '\a'
+        fi
+    fi
+    unset __cmd_start
+}
+add-zsh-hook preexec __cmd_timer_preexec
+add-zsh-hook precmd __cmd_timer_precmd
+
+#-------------------------------------------------------------------------------
+# TRASH (safe delete with undo — less anxiety than rm -i)
+#-------------------------------------------------------------------------------
+TRASH_DIR="$HOME/.local/share/Trash"
+
+trash() {
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: trash <file> [file2 ...]"
+        echo "       trash list          — show trashed files"
+        echo "       trash restore <n>   — restore file by number"
+        echo "       trash empty         — permanently delete all"
+        return 1
+    fi
+
+    case "$1" in
+        list)
+            if [[ ! -d "$TRASH_DIR" ]] || [[ -z "$(command ls -A "$TRASH_DIR" 2>/dev/null)" ]]; then
+                echo "Trash is empty."
+                return 0
+            fi
+            echo "Trashed files (newest first):"
+            echo "──────────────────────────────────────"
+            local i=1
+            command ls -lt "$TRASH_DIR" | tail -n +2 | while IFS= read -r line; do
+                printf "  %3d) %s\n" "$i" "$line"
+                ((i++))
+            done
+            echo ""
+            echo "Restore with: trash restore <number>"
+            ;;
+        restore)
+            local n="${2:-}"
+            if [[ -z "$n" ]]; then
+                echo "Usage: trash restore <number>"
+                echo "Run 'trash list' to see available files."
+                return 1
+            fi
+            local file=$(command ls -t "$TRASH_DIR" 2>/dev/null | sed -n "${n}p")
+            if [[ -z "$file" ]]; then
+                echo "No file at position $n."
+                return 1
+            fi
+            # Strip __trashed_<timestamp> suffix to recover original name
+            local original="${file%.__trashed_*}"
+            [[ -z "$original" ]] && original="$file"
+            if [[ -e "$original" ]]; then
+                echo "Warning: '$original' already exists in current directory."
+                echo -n "Overwrite? [y/N] "
+                read -r yn
+                [[ "$yn" != [yY]* ]] && return 1
+            fi
+            command mv "$TRASH_DIR/$file" "./$original"
+            echo "Restored: $original"
+            ;;
+        empty)
+            if [[ ! -d "$TRASH_DIR" ]] || [[ -z "$(command ls -A "$TRASH_DIR" 2>/dev/null)" ]]; then
+                echo "Trash is already empty."
+                return 0
+            fi
+            local count=$(command ls -1 "$TRASH_DIR" | wc -l | tr -d ' ')
+            echo -n "Permanently delete $count item(s)? [y/N] "
+            read -r yn
+            if [[ "$yn" == [yY]* ]]; then
+                command rm -rf "$TRASH_DIR"/*
+                echo "Trash emptied."
+            fi
+            ;;
+        *)
+            mkdir -p "$TRASH_DIR"
+            for f in "$@"; do
+                if [[ ! -e "$f" ]]; then
+                    echo "Not found: $f"
+                    continue
+                fi
+                local base="$(basename "$f")"
+                local dest="${base}.__trashed_$(date +%s)"
+                command mv "$f" "$TRASH_DIR/$dest"
+                echo "Trashed: $f"
+            done
+            ;;
+    esac
+}
+
+#-------------------------------------------------------------------------------
+# WHEREAMI (context recovery — "what was I doing?")
+#-------------------------------------------------------------------------------
+whereami() {
+    local C='\033[0;36m' B='\033[1m' D='\033[2m' G='\033[0;32m' R='\033[0m'
+
+    echo ""
+    printf "  ${B}${C}Where Am I?${R}\n"
+    printf "  ${D}──────────────────────────────────────${R}\n"
+    printf "  ${D}Dir:${R}  %s\n" "$(pwd)"
+    printf "  ${D}User:${R} %s@%s\n" "$(whoami)" "$(hostname)"
+
+    if git rev-parse --is-inside-work-tree &>/dev/null; then
+        local branch=$(git branch --show-current 2>/dev/null)
+        local changes=$(git status --short 2>/dev/null | wc -l | tr -d ' ')
+        printf "  ${D}Git:${R}  ${G}%s${R} (%s uncommitted)\n" "$branch" "$changes"
+    fi
+
+    echo ""
+    printf "  ${B}${C}Recent Commands${R}\n"
+    printf "  ${D}──────────────────────────────────────${R}\n"
+    fc -l -5 2>/dev/null | while IFS= read -r line; do
+        printf "  ${D}%s${R}\n" "$line"
+    done
+
+    echo ""
+    printf "  ${B}${C}Directory Contents${R}\n"
+    printf "  ${D}──────────────────────────────────────${R}\n"
+    command ls --color=auto -1 | head -10 | while IFS= read -r entry; do
+        printf "  %s\n" "$entry"
+    done
+    local total=$(command ls -1 2>/dev/null | wc -l | tr -d ' ')
+    if (( total > 10 )); then
+        printf "  ${D}... and %d more${R}\n" $((total - 10))
+    fi
+    echo ""
+}
+
+#-------------------------------------------------------------------------------
+# TODAY (daily activity journal — fight time blindness)
+#-------------------------------------------------------------------------------
+today() {
+    local C='\033[0;36m' B='\033[1m' D='\033[2m' G='\033[0;32m' Y='\033[1;33m' R='\033[0m'
+
+    echo ""
+    printf "  ${B}${C}Today — $(date '+%A, %B %d')${R}\n"
+    printf "  ${D}──────────────────────────────────────${R}\n"
+
+    echo ""
+    printf "  ${B}Recent commands:${R}\n"
+    fc -l -20 2>/dev/null | while IFS= read -r line; do
+        printf "  ${D}%s${R}\n" "$line"
+    done
+
+    echo ""
+    printf "  ${B}Files modified today:${R}\n"
+    local found=$(find . -maxdepth 3 -type f -mtime 0 \
+        -not -path '*/\.*' -not -path '*/node_modules/*' 2>/dev/null | head -15)
+    if [[ -n "$found" ]]; then
+        echo "$found" | while IFS= read -r line; do
+            printf "  ${D}%s${R}\n" "$line"
+        done
+    else
+        printf "  ${D}(none in current directory)${R}\n"
+    fi
+
+    if git rev-parse --is-inside-work-tree &>/dev/null; then
+        echo ""
+        printf "  ${B}Git activity:${R}\n"
+        local commits=$(git log --oneline --since="midnight" 2>/dev/null)
+        if [[ -n "$commits" ]]; then
+            echo "$commits" | while IFS= read -r line; do
+                printf "  ${G}%s${R}\n" "$line"
+            done
+        else
+            printf "  ${D}(no commits today)${R}\n"
+        fi
+    fi
+    echo ""
 }
 
 #-------------------------------------------------------------------------------
@@ -1191,7 +1407,7 @@ install_motd() {
 #===============================================================================
 # Echolume's Fun Homelab — Dynamic MOTD
 # lab.hoens.fun
-# Version: 17
+# Version: 18
 #===============================================================================
 
 # Colors
@@ -1243,6 +1459,12 @@ TIPS=(
     "aliases = show all shortcuts"
     "aliases add <name> <cmd> = custom alias"
     "aliases search <keyword> = filter list"
+    "whereami = instant context when lost"
+    "today = see what you did today"
+    "trash <file> = safe delete with undo"
+    "trash list = see what you trashed"
+    "man pages are color-coded now!"
+    "cd into a dir = auto-ls for free"
 )
 
 # Pick random tagline
@@ -1362,10 +1584,10 @@ boxline "${IP_ADDR} ${C_DIM}(${NET_IF})${C_RESET}"
 
 # Alias quick-reference
 printf "${C_CYAN}├─────────────────────────────────────────────────────────────┤${C_RESET}\n"
-boxline "${C_BOLD}${C_WHITE}Quick Aliases${C_RESET}           ${C_DIM}type${C_RESET} ${C_CYAN}aliases${C_RESET} ${C_DIM}for full list${C_RESET}"
+boxline "${C_BOLD}${C_WHITE}Quick Reference${C_RESET}         ${C_DIM}type${C_RESET} ${C_CYAN}aliases${C_RESET} ${C_DIM}for full list${C_RESET}"
 boxline "${C_DIM}ll${C_RESET} list  ${C_DIM}..${C_RESET} up dir  ${C_DIM}update${C_RESET} apt  ${C_DIM}temp${C_RESET} CPU temp"
 boxline "${C_DIM}gs${C_RESET} git st ${C_DIM}gd${C_RESET} diff   ${C_DIM}myip${C_RESET} pub IP ${C_DIM}ports${C_RESET} listen"
-boxline "${C_DIM}topcpu${C_RESET} / ${C_DIM}topmem${C_RESET}   ${C_DIM}psg${C_RESET} proc search  ${C_DIM}duf${C_RESET} sizes"
+boxline "${C_CYAN}whereami${C_RESET} ${C_DIM}context${C_RESET}  ${C_CYAN}today${C_RESET} ${C_DIM}activity${C_RESET}  ${C_CYAN}trash${C_RESET} ${C_DIM}safe rm${C_RESET}"
 
 # ~30% chance to show a tip
 if (( RANDOM % 10 < 3 )); then
@@ -1502,6 +1724,24 @@ apply_optimizations() {
         fi
     fi
     
+    # Enable PCIe Gen 3 on Pi 5 (if PCIe detected and not already set)
+    # Pi 5 defaults to Gen 2; Gen 3 doubles NVMe/Hailo throughput.
+    # Safe: the Pi 5 PCIe controller supports Gen 3 natively.
+    if [[ "$HAS_PCIE" == true ]] && [[ -n "${BOOT_CONFIG:-}" ]]; then
+        if grep -qE '^\s*dtparam=pciex1_gen=3' "$BOOT_CONFIG" 2>/dev/null; then
+            success "PCIe Gen 3 already enabled"
+        else
+            log "Enabling PCIe Gen 3 in $BOOT_CONFIG..."
+            if echo -e "\n# PCIe Gen 3 — doubles NVMe/Hailo throughput (pi-bootstrap)\ndtparam=pciex1_gen=3" | sudo tee -a "$BOOT_CONFIG" >/dev/null; then
+                success "PCIe Gen 3 enabled (takes effect after reboot)"
+                warn "Reboot required for PCIe Gen 3"
+            else
+                error "Failed to enable PCIe Gen 3"
+                ((opt_failures++)) || true
+            fi
+        fi
+    fi
+
     if [[ $opt_failures -eq 0 ]]; then
         success "Optimizations applied"
         track_status "Optimizations" "OK"
@@ -1580,13 +1820,13 @@ print_summary() {
 main() {
     echo ""
     echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup  (v17)       ║${NC}"
+    echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup  (v18)       ║${NC}"
     echo -e "${BOLD}${CYAN}║     by Echolume · lab.hoens.fun                           ║${NC}"
     echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
     # Initialize log
-    echo "=== pi-bootstrap.sh v17 started $(date -Iseconds) ===" > "$LOG_FILE"
+    echo "=== pi-bootstrap.sh v18 started $(date -Iseconds) ===" > "$LOG_FILE"
     
     # Info-only mode
     if [[ "$INFO_ONLY" == true ]]; then
