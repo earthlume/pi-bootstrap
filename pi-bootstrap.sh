@@ -338,13 +338,16 @@ detect_extended_hardware() {
     fi
     
     # Boot config location (varies by OS version)
+    # NOTE: may already be set by detect_system(); only set if unset
     log "  → Boot config..."
-    if [[ -f /boot/firmware/config.txt ]]; then
-        BOOT_CONFIG="/boot/firmware/config.txt"
-    elif [[ -f /boot/config.txt ]]; then
-        BOOT_CONFIG="/boot/config.txt"
-    else
-        BOOT_CONFIG="not found"
+    if [[ -z "${BOOT_CONFIG:-}" ]]; then
+        if [[ -f /boot/firmware/config.txt ]]; then
+            BOOT_CONFIG="/boot/firmware/config.txt"
+        elif [[ -f /boot/config.txt ]]; then
+            BOOT_CONFIG="/boot/config.txt"
+        else
+            BOOT_CONFIG=""
+        fi
     fi
     
     # Check for common Pi overlays/settings
@@ -1846,17 +1849,17 @@ main() {
     # Full install
     detect_system
     backup_configs
-    update_os
-    install_packages
-    install_ohmyzsh
-    install_plugins
-    install_p10k
-    install_fonts
+    update_os          || true
+    install_packages   || true
+    install_ohmyzsh    || true
+    install_plugins    || true
+    install_p10k       || true
+    install_fonts      || true
     generate_zshrc
     generate_p10k_config
-    install_motd
-    change_shell
-    apply_optimizations
+    install_motd       || true
+    change_shell       || true
+    apply_optimizations || true
     print_summary
     
     # Return failure count (don't use 'exit' - it logs out when piped)
