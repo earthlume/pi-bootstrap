@@ -110,10 +110,12 @@ spin() {
     local start=$SECONDS
 
     # Run command in background, redirect output to log
-    "$@" >> "$LOG_FILE" 2>&1 &
+    # Subshell wrapper: set +e so set -e doesn't kill us, and capture the
+    # real exit code via wait.
+    ( "$@" ) >> "$LOG_FILE" 2>&1 &
     local pid=$!
 
-    # Animate while process runs
+    # Animate while process runs (|| true guards against set -e)
     local i=0
     while kill -0 "$pid" 2>/dev/null; do
         local elapsed=$(( SECONDS - start ))
@@ -123,9 +125,9 @@ spin() {
         sleep 0.1
     done
 
-    # Get exit code
-    wait "$pid"
-    local rc=$?
+    # Get exit code (capture before || true so we keep the real code)
+    local rc=0
+    wait "$pid" || rc=$?
     local elapsed=$(( SECONDS - start ))
     local mins=$(( elapsed / 60 ))
     local secs=$(( elapsed % 60 ))
@@ -798,6 +800,10 @@ alias l='ls -CF --color=auto'
 # Grep with color
 alias grep='grep --color=auto'
 
+# Clear screen
+alias cls='clear'
+alias c='clear'
+
 # Quick navigation
 alias ..='cd ..'
 alias ...='cd ../..'
@@ -931,6 +937,8 @@ aliases() {
             _aliases_row "rm" "confirm before delete (rm -i)"
             _aliases_row "cp" "confirm before overwrite (cp -i)"
             _aliases_row "mv" "confirm before overwrite (mv -i)"
+            _aliases_section "Screen"
+            _aliases_row "cls / c" "clear screen"
             _aliases_section "Navigation"
             _aliases_row ".." "up one directory"
             _aliases_row "..." "up two directories"
@@ -1047,7 +1055,8 @@ trash() {
             echo "Trashed files (newest first):"
             echo "──────────────────────────────────────"
             local i=1
-            command ls -lt "$TRASH_DIR" | tail -n +2 | while IFS= read -r line; do
+            local files=("${(@f)$(command ls -lt "$TRASH_DIR" | tail -n +2)}")
+            for line in "${files[@]}"; do
                 printf "  %3d) %s\n" "$i" "$line"
                 ((i++))
             done
