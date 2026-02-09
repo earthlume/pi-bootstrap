@@ -867,14 +867,14 @@ aliases() {
     _aliases_section() {
         printf "${C_C}│${C_R}                                                        ${C_C}│${C_R}\n"
         printf "${C_C}│${C_R} ${C_B}${C_Y}%s${C_R}%*s${C_C}│${C_R}\n" "$1" $((55 - ${#1})) ""
-        printf "${C_C}│${C_R} ${C_D}%s${C_R}%*s${C_C}│${C_R}\n" "────────────────────────────────────────────────────" 1 ""
+        printf "${C_C}│${C_R} ${C_D}%s${C_R}%*s${C_C}│${C_R}\n" "────────────────────────────────────────────────────" 3 ""
     }
     _aliases_row() {
         local name="$1" desc="$2"
         local padname=12
         local padded=$(printf "%-${padname}s" "$name")
         local total=$(( ${#padded} + ${#desc} ))
-        local gap=$((54 - total))
+        local gap=$((53 - total))
         (( gap < 0 )) && gap=0
         printf "${C_C}│${C_R}  ${C_G}%-${padname}s${C_R} ${C_D}%s${C_R}%*s${C_C}│${C_R}\n" "$name" "$desc" "$gap" ""
     }
