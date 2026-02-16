@@ -1,7 +1,7 @@
 #!/bin/bash
 #===============================================================================
 # pi-bootstrap.sh — Echolume's ADHD-Friendly Pi Shell Setup
-# Version: 18
+# Version: 19
 #
 # WHAT:  Installs zsh + oh-my-zsh + powerlevel10k with sane defaults
 # WHY:   Reduce cognitive load; make CLI accessible
@@ -536,6 +536,47 @@ update_os() {
 }
 
 #-------------------------------------------------------------------------------
+# VERIFY TIME SYNC (clock drift breaks TLS, apt signatures, logs)
+#-------------------------------------------------------------------------------
+verify_time_sync() {
+    header "VERIFYING TIME SYNC"
+
+    local sync_ok=false
+
+    # Check if systemd-timesyncd is active (Pi OS default)
+    if timedatectl show --property=NTP --value 2>/dev/null | grep -qi "yes"; then
+        local synced
+        synced=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || echo "no")
+        if [[ "$synced" == "yes" ]]; then
+            success "Time synced via systemd-timesyncd"
+            sync_ok=true
+        else
+            warn "timesyncd active but not yet synchronized — may need a moment"
+        fi
+    elif systemctl is-active --quiet chronyd 2>/dev/null; then
+        success "Time synced via chrony"
+        sync_ok=true
+    else
+        # NTP not active — try enabling timesyncd
+        warn "NTP not active — enabling systemd-timesyncd..."
+        if sudo timedatectl set-ntp true 2>/dev/null; then
+            success "systemd-timesyncd enabled (will sync shortly)"
+        else
+            warn "Could not enable NTP — clock may drift"
+        fi
+    fi
+
+    # Log the current time for the record
+    log "System time: $(date -Iseconds)"
+
+    if [[ "$sync_ok" == true ]]; then
+        track_status "Time Sync" "OK"
+    else
+        track_status "Time Sync" "SKIP"
+    fi
+}
+
+#-------------------------------------------------------------------------------
 # INSTALL PACKAGES
 #-------------------------------------------------------------------------------
 install_packages() {
@@ -561,6 +602,8 @@ install_packages() {
         ncdu
         tree
         jq
+        sqlite3
+        python3-venv
     )
 
     log "Installing: ${packages[*]}"
@@ -570,6 +613,24 @@ install_packages() {
     else
         track_status "Install Packages" "FAIL"
         return 1
+    fi
+
+    # Install uv (Python package/venv manager) — not in Debian repos
+    if command -v uv &>/dev/null; then
+        success "uv already installed ($(uv --version 2>/dev/null || echo 'unknown'))"
+    else
+        log "Installing uv (Python package manager)..."
+        local uv_script
+        uv_script=$(curl -fsSL https://astral.sh/uv/install.sh 2>/dev/null) || true
+        if [[ -n "$uv_script" ]]; then
+            if spin "Installing uv" sh -c "$uv_script"; then
+                success "uv installed"
+            else
+                warn "uv install failed (non-critical, can install later)"
+            fi
+        else
+            warn "Could not download uv installer (non-critical)"
+        fi
     fi
 }
 
@@ -1419,7 +1480,7 @@ install_motd() {
 #===============================================================================
 # Echolume's Fun Homelab — Dynamic MOTD
 # lab.hoens.fun
-# Version: 18
+# Version: 19
 #===============================================================================
 
 # Colors
@@ -1574,11 +1635,12 @@ else
     DISK_COLOR="${C_RED}"
 fi
 
-# IP address and interface
+# IP address, interface, and MAC
 IP_ADDR=$(timeout 2 hostname -I 2>/dev/null | awk '{print $1}')
 [[ -z "$IP_ADDR" ]] && IP_ADDR="unknown"
 NET_IF=$(timeout 2 ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
 [[ -z "$NET_IF" ]] && NET_IF="eth0"
+MAC_ADDR=$(cat "/sys/class/net/${NET_IF}/address" 2>/dev/null || echo "unknown")
 
 # Build stats line
 STATS="${TEMP_STR}  ${C_DIM}CPU${C_RESET} ${CPU_PCT}%  ${C_DIM}RAM${C_RESET} ${RAM_COLOR}${RAM_PCT}%${C_RESET}  ${C_DIM}Disk${C_RESET} ${DISK_COLOR}${DISK_PCT}%${C_RESET} ${C_DIM}(${DISK_USED}/${DISK_TOTAL})${C_RESET}"
@@ -1592,7 +1654,7 @@ printf "${C_CYAN}├────────────────────
 boxline2 "${PI_MODEL}" "${UPTIME_STR}"
 boxline "${C_DIM}${OS_INFO} · Kernel ${KERNEL_VER}${C_RESET}"
 boxline "${STATS}"
-boxline "${IP_ADDR} ${C_DIM}(${NET_IF})${C_RESET}"
+boxline "${IP_ADDR} ${C_DIM}(${NET_IF})${C_RESET}  ${C_DIM}MAC${C_RESET} ${MAC_ADDR}"
 
 # Alias quick-reference
 printf "${C_CYAN}├─────────────────────────────────────────────────────────────┤${C_RESET}\n"
@@ -1754,12 +1816,119 @@ apply_optimizations() {
         fi
     fi
 
+    # Fan curve for Pi 5 (if fan header is present and config.txt writable)
+    # Default thresholds: fan starts too late (50°C) and ramps slowly.
+    # These set a more aggressive curve: on at 45°C, full at 55°C.
+    if [[ -n "${BOOT_CONFIG:-}" ]] && [[ -f "$BOOT_CONFIG" ]]; then
+        if grep -qE '^\s*dtparam=fan_temp0_hyst' "$BOOT_CONFIG" 2>/dev/null; then
+            success "Fan curve already configured"
+        elif [[ -d /sys/class/thermal/cooling_device0 ]]; then
+            log "Setting fan curve in $BOOT_CONFIG..."
+            if cat <<'FANCURVE' | sudo tee -a "$BOOT_CONFIG" >/dev/null
+
+# Fan curve — start early, ramp fast, keep cool (pi-bootstrap)
+dtparam=fan_temp0=45000
+dtparam=fan_temp0_hyst=5000
+dtparam=fan_temp0_speed=75
+dtparam=fan_temp1=50000
+dtparam=fan_temp1_hyst=5000
+dtparam=fan_temp1_speed=125
+dtparam=fan_temp2=55000
+dtparam=fan_temp2_hyst=5000
+dtparam=fan_temp2_speed=250
+FANCURVE
+            then
+                success "Fan curve configured (takes effect after reboot)"
+            else
+                error "Failed to set fan curve"
+                ((opt_failures++)) || true
+            fi
+        fi
+    fi
+
     if [[ $opt_failures -eq 0 ]]; then
         success "Optimizations applied"
         track_status "Optimizations" "OK"
     else
         track_status "Optimizations" "FAIL"
     fi
+}
+
+#-------------------------------------------------------------------------------
+# WRITE /etc/pi-info — quick reference for MAC/IP (OPNsense static leases etc)
+#-------------------------------------------------------------------------------
+write_pi_info() {
+    log "Writing /etc/pi-info..."
+
+    local net_if
+    net_if=$(timeout 2 ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
+    [[ -z "$net_if" ]] && net_if="eth0"
+    local ip_addr mac_addr
+    ip_addr=$(timeout 2 hostname -I 2>/dev/null | awk '{print $1}')
+    mac_addr=$(cat "/sys/class/net/${net_if}/address" 2>/dev/null || echo "unknown")
+
+    sudo tee /etc/pi-info >/dev/null <<EOF
+# Pi network info — generated by pi-bootstrap v19 on $(date -Iseconds)
+# Useful for OPNsense static leases, firewall rules, etc.
+HOSTNAME=$(hostname)
+MODEL=$PI_MODEL
+INTERFACE=$net_if
+IP_ADDRESS=${ip_addr:-unknown}
+MAC_ADDRESS=${mac_addr}
+EOF
+    success "Wrote /etc/pi-info (MAC + IP bookmark)"
+}
+
+#-------------------------------------------------------------------------------
+# HEALTH CHECK — baseline snapshot for known-good state
+#-------------------------------------------------------------------------------
+health_check() {
+    header "HEALTH CHECK (baseline snapshot)"
+
+    # vcgencmd sanity: temp, throttle flags, firmware version
+    if command -v vcgencmd &>/dev/null; then
+        local temp throttle firmware
+        temp=$(vcgencmd measure_temp 2>/dev/null || echo "N/A")
+        throttle=$(vcgencmd get_throttled 2>/dev/null || echo "N/A")
+        firmware=$(vcgencmd version 2>/dev/null | head -1 || echo "N/A")
+
+        log "  Temp:      $temp"
+        log "  Throttle:  $throttle"
+        log "  Firmware:  $firmware"
+
+        # Decode throttle flags (validate before arithmetic — "N/A" would crash)
+        local flags="${throttle##*=}"
+        if [[ "$flags" == "0x0" ]]; then
+            success "No throttling detected — clean baseline"
+        elif [[ "$flags" =~ ^0x[0-9a-fA-F]+$ ]]; then
+            warn "Throttle flags: $flags (undervoltage or thermal event)"
+            [[ $((flags & 0x1)) -ne 0 ]] && warn "  → Under-voltage detected"
+            [[ $((flags & 0x2)) -ne 0 ]] && warn "  → ARM frequency capped"
+            [[ $((flags & 0x4)) -ne 0 ]] && warn "  → Currently throttled"
+            [[ $((flags & 0x8)) -ne 0 ]] && warn "  → Soft temperature limit active"
+        else
+            warn "Could not parse throttle flags: $flags"
+        fi
+    else
+        log "  vcgencmd not available (not a Pi or not in PATH)"
+    fi
+
+    # dmesg error scan — catch orphan cleanups, NVMe errors, undervoltage
+    log ""
+    log "  Scanning dmesg for warnings/errors..."
+    local dmesg_issues
+    dmesg_issues=$(dmesg --level=err,warn 2>/dev/null || sudo dmesg --level=err,warn 2>/dev/null)
+    dmesg_issues=$(echo "$dmesg_issues" | grep -iE 'voltage|throttl|nvme|error|fail|orphan' | tail -10)
+    if [[ -n "$dmesg_issues" ]]; then
+        warn "dmesg flagged items (review in log):"
+        while IFS= read -r line; do
+            log "    $line"
+        done <<< "$dmesg_issues"
+    else
+        success "dmesg clean — no voltage/NVMe/orphan issues"
+    fi
+
+    track_status "Health Check" "OK"
 }
 
 #-------------------------------------------------------------------------------
@@ -1776,9 +1945,10 @@ print_summary() {
     echo -e "${BOLD}INSTALLATION STATUS${NC}"
     echo "───────────────────────────────────────────────────────────"
     
-    for step in "Hardware Detection" "Backup Configs" "OS Update" "Install Packages" \
+    for step in "Hardware Detection" "Backup Configs" "Time Sync" "OS Update" "Install Packages" \
                 "Oh-My-Zsh" "Zsh Plugins" "Powerlevel10k" "Nerd Fonts" \
-                "Generate .zshrc" "Generate .p10k.zsh" "Custom MOTD" "Change Shell" "Optimizations"; do
+                "Generate .zshrc" "Generate .p10k.zsh" "Custom MOTD" "Change Shell" \
+                "Optimizations" "Health Check"; do
         local status="${STATUS[$step]:-N/A}"
         case $status in
             OK)   echo -e "  ${GREEN}✓${NC} $step" ;;
@@ -1809,6 +1979,7 @@ print_summary() {
     echo "───────────────────────────────────────────────────────────"
     echo "  Config:   ~/.zshrc, ~/.p10k.zsh"
     echo "  MOTD:     /etc/profile.d/99-echolume-motd.sh"
+    echo "  Pi Info:  /etc/pi-info (MAC + IP for static leases)"
     echo "  Backups:  $BACKUP_DIR"
     echo "  Log:      $LOG_FILE"
     echo ""
@@ -1832,13 +2003,13 @@ print_summary() {
 main() {
     echo ""
     echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup  (v18)       ║${NC}"
+    echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup  (v19)       ║${NC}"
     echo -e "${BOLD}${CYAN}║     by Echolume · lab.hoens.fun                           ║${NC}"
     echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
     # Initialize log
-    echo "=== pi-bootstrap.sh v18 started $(date -Iseconds) ===" > "$LOG_FILE"
+    echo "=== pi-bootstrap.sh v19 started $(date -Iseconds) ===" > "$LOG_FILE"
     
     # Info-only mode
     if [[ "$INFO_ONLY" == true ]]; then
@@ -1849,6 +2020,7 @@ main() {
     # Full install
     detect_system
     backup_configs
+    verify_time_sync   || true
     update_os          || true
     install_packages   || true
     install_ohmyzsh    || true
@@ -1860,6 +2032,8 @@ main() {
     install_motd       || true
     change_shell       || true
     apply_optimizations || true
+    health_check       || true
+    write_pi_info      || true
     print_summary
     
     # Return failure count (don't use 'exit' - it logs out when piped)
