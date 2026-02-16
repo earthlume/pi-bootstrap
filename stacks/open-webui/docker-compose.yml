@@ -1,0 +1,20 @@
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - OLLAMA_BASE_URL=http://127.0.0.1:11434
+      - WEBUI_AUTH=true
+      - ENABLE_SIGNUP=true
+      - WEBUI_TELEMETRY=false
+      - DO_NOT_TRACK=true
+      - ENABLE_COMMUNITY_SHARING=false
+      - WEBUI_URL=https://chat.lab.hoens.fun
+      - PORT=8080
+    volumes:
+      - open-webui-data:/app/backend/data
+
+volumes:
+  open-webui-data:
