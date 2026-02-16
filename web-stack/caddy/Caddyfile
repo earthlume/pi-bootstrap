@@ -1,0 +1,19 @@
+*.lab.hoens.fun {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+
+	@chat host chat.lab.hoens.fun
+	handle @chat {
+		reverse_proxy localhost:8080
+	}
+
+	@dockge host dockge.lab.hoens.fun
+	handle @dockge {
+		reverse_proxy localhost:5001
+	}
+
+	handle {
+		respond "Nothing here, m'boy." 404
+	}
+}
