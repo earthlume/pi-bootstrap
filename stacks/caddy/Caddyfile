@@ -1,6 +1,11 @@
 *.lab.hoens.fun {
 	tls {
 		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+		# Disable local propagation checks — OPNsense redirects port 53 to
+		# Unbound, which intercepts queries to 1.1.1.1/8.8.8.8 and has no
+		# knowledge of the ACME TXT record. Let's Encrypt validates externally.
+		propagation_timeout -1
+		propagation_delay 30s
 	}
 
 	@chat host chat.lab.hoens.fun

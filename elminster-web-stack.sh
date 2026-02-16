@@ -480,6 +480,18 @@ deploy_dockge() {
 
 #-------------------------------------------------------------------------------
 # OPEN WEBUI DEPLOYMENT
+#
+# Model note — Qwen3 thinking mode on Pi hardware:
+#   Qwen3 models have thinking mode (/think) enabled by default. On CPU-only
+#   Pi hardware, models ≥4B enter reasoning loops that take minutes to resolve
+#   (observed: 50+ lines of circular <think> output before producing a response).
+#   The Elminster Modelfile strips thinking mode for CLI (ollama run), but Open
+#   WebUI may send its own chat template, bypassing the Modelfile TEMPLATE.
+#
+#   DEFAULT_MODELS is set to qwen3:1.7b for fast first-time UX. Users can
+#   switch to larger models manually in the UI. If Qwen3 thinking loops are
+#   observed in the web UI, consider adding /no_think to system prompts or
+#   disabling thinking mode per-model in Open WebUI's admin settings.
 #-------------------------------------------------------------------------------
 deploy_open_webui() {
     header "DEPLOYING OPEN WEBUI (CHAT INTERFACE)"

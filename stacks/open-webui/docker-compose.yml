@@ -13,6 +13,9 @@ services:
       - ENABLE_COMMUNITY_SHARING=false
       - WEBUI_URL=https://chat.lab.hoens.fun
       - PORT=8080
+      # Default to a fast model so first-time users (Mary) get snappy responses.
+      # Qwen3 4B+ models have thinking mode that loops on CPU-only Pi hardware.
+      - DEFAULT_MODELS=qwen3:1.7b
     volumes:
       - open-webui-data:/app/backend/data
 

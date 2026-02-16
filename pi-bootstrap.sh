@@ -1743,32 +1743,38 @@ change_shell() {
     
     local zsh_path
     zsh_path=$(command -v zsh)
-    
-    if [[ "$SHELL" == "$zsh_path" ]]; then
-        success "zsh is already default shell"
+
+    # Target the invoking user, not root (when run via sudo)
+    local target_user="${SUDO_USER:-$USER}"
+
+    # Check the target user's shell from /etc/passwd (not $SHELL, which is root's under sudo)
+    local current_shell
+    current_shell=$(getent passwd "$target_user" | cut -d: -f7)
+    if [[ "$current_shell" == "$zsh_path" ]]; then
+        success "zsh is already default shell for $target_user"
         track_status "Change Shell" "OK"
         return 0
     fi
-    
+
     # Detect if running non-interactively (piped install)
     if [[ ! -t 0 ]]; then
         warn "Non-interactive mode detected (piped install)"
         warn "Cannot change shell automatically — run this manually:"
         echo ""
-        echo -e "    ${BOLD}chsh -s $zsh_path${NC}"
+        echo -e "    ${BOLD}chsh -s $zsh_path $target_user${NC}"
         echo ""
         warn "Then log out and back in."
         track_status "Change Shell" "SKIP"
         return 0
     fi
-    
-    log "Changing default shell to zsh..."
-    if chsh -s "$zsh_path"; then
-        success "Default shell changed to zsh"
+
+    log "Changing default shell to zsh for $target_user..."
+    if chsh -s "$zsh_path" "$target_user"; then
+        success "Default shell changed to zsh for $target_user"
         warn "Log out and back in (or reboot) for change to take effect"
         track_status "Change Shell" "OK"
     else
-        error "chsh failed — run manually: chsh -s $zsh_path"
+        error "chsh failed — run manually: chsh -s $zsh_path $target_user"
         track_status "Change Shell" "FAIL"
     fi
 }
@@ -1989,7 +1995,7 @@ print_summary() {
     echo ""
     echo -e "${BOLD}NEXT STEPS${NC}"
     echo "───────────────────────────────────────────────────────────"
-    echo "  1. Run: chsh -s $(command -v zsh)  (if not done automatically)"
+    echo "  1. Run: chsh -s $(command -v zsh) \$USER  (if not done automatically)"
     echo "  2. Log out and back in (or run: exec zsh)"
     echo "  3. Configure your terminal font to 'MesloLGS NF'"
     echo ""
