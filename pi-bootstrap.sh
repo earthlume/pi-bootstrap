@@ -600,6 +600,7 @@ install_packages() {
         ncdu
         tree
         jq
+        neovim
         sqlite3
         python3-venv
     )
@@ -902,7 +903,7 @@ alias myip='curl -s ifconfig.me && echo'
 alias ports='sudo ss -tulnp'
 
 # Raspberry Pi specific
-alias temp='/opt/vc/bin/vcgencmd measure_temp 2>/dev/null || cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null | awk "{print \$1/1000\" C\"}"'
+alias temp='vcgencmd measure_temp 2>/dev/null || echo "N/A"'
 alias throttle='vcgencmd get_throttled 2>/dev/null || echo "vcgencmd not available"'
 
 # Git shortcuts (if you use git)
@@ -1318,9 +1319,9 @@ fi
 [[ -f ~/.p10k.zsh ]] && source ~/.p10k.zsh
 
 #-------------------------------------------------------------------------------
-# CUSTOM PATH ADDITIONS (add your own below)
+# PATH — include ~/.local/bin (where uv, pip --user, etc. install binaries)
 #-------------------------------------------------------------------------------
-# export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
 
 ZSHRC_BODY
 
