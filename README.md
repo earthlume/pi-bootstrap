@@ -9,20 +9,20 @@ and get to the fun part.
 ## Quick Start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Eecholume/pi-bootstrap/main/pi-bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/earthlume/pi-bootstrap/main/pi-bootstrap.sh | bash
 ```
 
 **On slow WiFi or flaky SSH?** Download first, then run:
 
 ```bash
-curl -fsSL -o /tmp/pi-bootstrap.sh https://raw.githubusercontent.com/Eecholume/pi-bootstrap/main/pi-bootstrap.sh
+curl -fsSL -o /tmp/pi-bootstrap.sh https://raw.githubusercontent.com/earthlume/pi-bootstrap/main/pi-bootstrap.sh
 bash /tmp/pi-bootstrap.sh
 ```
 
 Or clone and run locally:
 
 ```bash
-git clone https://github.com/Eecholume/pi-bootstrap.git
+git clone https://github.com/earthlume/pi-bootstrap.git
 bash pi-bootstrap/pi-bootstrap.sh
 ```
 
@@ -74,7 +74,7 @@ The script auto-selects a tier based on your Pi's hardware:
 |------|------|
 | `~/.zshrc` | Shell config with ADHD-friendly defaults |
 | `~/.p10k.zsh` | Pre-configured prompt (no wizard needed) |
-| `/etc/profile.d/99-echolume-motd.sh` | Dynamic login banner |
+| `/etc/profile.d/99-earthlume-motd.sh` | Dynamic login banner |
 | `~/.pi-bootstrap-backups/<timestamp>/` | Backup of any overwritten configs |
 | `~/pi-bootstrap.log` | Install log |
 
