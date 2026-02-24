@@ -1496,7 +1496,7 @@ install_motd() {
     sudo tee /etc/profile.d/99-earthlume-motd.sh > /dev/null << 'MOTD_SCRIPT'
 #!/bin/bash
 #===============================================================================
-# earthlume's Fun Homelab — Dynamic MOTD
+# Earthlume's Fun Homelab — Dynamic MOTD
 # Version: 19
 #===============================================================================
 
@@ -1666,7 +1666,7 @@ STATS="${TEMP_STR}  ${C_DIM}CPU${C_RESET} ${CPU_PCT}%  ${C_DIM}RAM${C_RESET} ${R
 # Print the MOTD
 echo ""
 printf "${C_CYAN}╭─────────────────────────────────────────────────────────────╮${C_RESET}\n"
-boxline2 "${C_BOLD}${C_WHITE}${HOSTNAME_UPPER}${C_RESET}" ""
+boxline2 "${C_BOLD}${C_WHITE}${HOSTNAME_UPPER}${C_RESET}" "${C_DIM}lab.hoens.fun${C_RESET}"
 boxline "${C_DIM}\"${TAGLINE}\"${C_RESET}"
 printf "${C_CYAN}├─────────────────────────────────────────────────────────────┤${C_RESET}\n"
 boxline2 "${PI_MODEL}" "${UPTIME_STR}"
@@ -2023,7 +2023,7 @@ main() {
     echo ""
     echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup  (v19)       ║${NC}"
-    echo -e "${BOLD}${CYAN}║     by earthlume                                          ║${NC}"
+    echo -e "${BOLD}${CYAN}║     by Earthlume · lab.hoens.fun                           ║${NC}"
     echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
