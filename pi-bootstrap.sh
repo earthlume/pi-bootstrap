@@ -1,6 +1,6 @@
 #!/bin/bash
 #===============================================================================
-# pi-bootstrap.sh — Echolume's ADHD-Friendly Pi Shell Setup
+# pi-bootstrap.sh — earthlume's ADHD-Friendly Pi Shell Setup
 # Version: 19
 #
 # WHAT:  Installs zsh + oh-my-zsh + powerlevel10k with sane defaults
@@ -792,8 +792,8 @@ generate_zshrc() {
 #-------------------------------------------------------------------------------
 # MOTD (must run BEFORE instant prompt to avoid p10k warning)
 #-------------------------------------------------------------------------------
-if [[ -o login && -f /etc/profile.d/99-echolume-motd.sh ]]; then
-    bash /etc/profile.d/99-echolume-motd.sh
+if [[ -o login && -f /etc/profile.d/99-earthlume-motd.sh ]]; then
+    bash /etc/profile.d/99-earthlume-motd.sh
 fi
 
 # Path to oh-my-zsh installation
@@ -1493,11 +1493,10 @@ install_motd() {
     log "Creating dynamic MOTD script..."
     
     # Create the MOTD script
-    sudo tee /etc/profile.d/99-echolume-motd.sh > /dev/null << 'MOTD_SCRIPT'
+    sudo tee /etc/profile.d/99-earthlume-motd.sh > /dev/null << 'MOTD_SCRIPT'
 #!/bin/bash
 #===============================================================================
-# Echolume's Fun Homelab — Dynamic MOTD
-# lab.hoens.fun
+# earthlume's Fun Homelab — Dynamic MOTD
 # Version: 19
 #===============================================================================
 
@@ -1667,7 +1666,7 @@ STATS="${TEMP_STR}  ${C_DIM}CPU${C_RESET} ${CPU_PCT}%  ${C_DIM}RAM${C_RESET} ${R
 # Print the MOTD
 echo ""
 printf "${C_CYAN}╭─────────────────────────────────────────────────────────────╮${C_RESET}\n"
-boxline2 "${C_BOLD}${C_WHITE}${HOSTNAME_UPPER}${C_RESET}" "${C_DIM}lab.hoens.fun${C_RESET}"
+boxline2 "${C_BOLD}${C_WHITE}${HOSTNAME_UPPER}${C_RESET}" ""
 boxline "${C_DIM}\"${TAGLINE}\"${C_RESET}"
 printf "${C_CYAN}├─────────────────────────────────────────────────────────────┤${C_RESET}\n"
 boxline2 "${PI_MODEL}" "${UPTIME_STR}"
@@ -1694,7 +1693,7 @@ echo ""
 MOTD_SCRIPT
 
     # Make it executable
-    sudo chmod +x /etc/profile.d/99-echolume-motd.sh
+    sudo chmod +x /etc/profile.d/99-earthlume-motd.sh
     
     # Remove the default Debian disclaimer (/etc/motd)
     if [[ -f /etc/motd ]] && [[ -s /etc/motd ]]; then
@@ -1712,7 +1711,7 @@ MOTD_SCRIPT
     # v4 fix: Prefer sshd_config.d drop-in to avoid duplicating lines in sshd_config
     if [[ -d /etc/ssh/sshd_config.d ]]; then
         log "Disabling SSH last login message (drop-in)..."
-        printf "PrintLastLog no\n" | sudo tee /etc/ssh/sshd_config.d/99-echolume.conf >/dev/null
+        printf "PrintLastLog no\n" | sudo tee /etc/ssh/sshd_config.d/99-earthlume.conf >/dev/null
     elif [[ -f /etc/ssh/sshd_config ]]; then
         if ! grep -q "^PrintLastLog no" /etc/ssh/sshd_config; then
             log "Disabling SSH last login message..."
@@ -1803,7 +1802,7 @@ apply_optimizations() {
     
     # Limit journal size (saves SD card writes)
     # v4 fix: Use drop-in config instead of editing main journald.conf
-    local jdrop="/etc/systemd/journald.conf.d/99-echolume-limit.conf"
+    local jdrop="/etc/systemd/journald.conf.d/99-earthlume-limit.conf"
     if [[ -f "$jdrop" ]] && grep -qE '^\s*SystemMaxUse\s*=\s*50M\s*$' "$jdrop" 2>/dev/null; then
         success "Journald already limited (drop-in present)"
     else
@@ -1998,7 +1997,7 @@ print_summary() {
     echo -e "${BOLD}FILES CREATED${NC}"
     echo "───────────────────────────────────────────────────────────"
     echo "  Config:   ~/.zshrc, ~/.p10k.zsh"
-    echo "  MOTD:     /etc/profile.d/99-echolume-motd.sh"
+    echo "  MOTD:     /etc/profile.d/99-earthlume-motd.sh"
     echo "  Pi Info:  /etc/pi-info (MAC + IP for static leases)"
     echo "  Backups:  $BACKUP_DIR"
     echo "  Log:      $LOG_FILE"
@@ -2024,7 +2023,7 @@ main() {
     echo ""
     echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${CYAN}║     PI-BOOTSTRAP — ADHD-Friendly Shell Setup  (v19)       ║${NC}"
-    echo -e "${BOLD}${CYAN}║     by Echolume · lab.hoens.fun                           ║${NC}"
+    echo -e "${BOLD}${CYAN}║     by earthlume                                          ║${NC}"
     echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
