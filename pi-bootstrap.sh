@@ -3,28 +3,47 @@
 # pi-bootstrap.sh — Earthlume's ADHD-Friendly Pi Shell Setup
 # Version: 20
 #
-# WHAT:  Installs zsh + Antidote + Starship/P10k + Catppuccin Mocha
-# WHY:   Reduce cognitive load; make CLI accessible and dopamine-friendly
+# WHAT:  Installs zsh + antidote + catppuccin-themed tooling with sane defaults
+# WHY:   Reduce cognitive load; make CLI accessible and pleasant
 # HOW:   Auto-detects hardware, picks light/standard/full tier
 #
 # USAGE: curl -fsSL <url> | bash
-#    or: bash pi-bootstrap.sh [--dry-run] [--tier-override=full] [--help]
+#    or: bash pi-bootstrap.sh [FLAGS]
 #
 # FLAGS:
-#   --optimize          Apply safe system tweaks (swappiness, journald, PCIe)
-#   --update-os         Run apt update/upgrade (kernel held)
-#   --no-chsh           Don't change default shell to zsh
-#   --no-motd           Don't install custom MOTD
-#   --info-only         Just print system info and exit
-#   --dry-run           Show what would be installed without doing it
-#   --tier-override=X   Force tier: light, standard, or full
-#   --uninstall         Remove pi-bootstrap configs (keeps apt packages)
+#   --optimize         Apply safe system tweaks (swappiness, journald, PCIe)
+#   --update-os        Run apt update/upgrade (default: skip)
+#   --no-chsh          Don't change default shell to zsh
+#   --no-motd          Don't install custom MOTD
+#   --info-only        Just print system info and exit
+#   --dry-run          Show what would happen without making changes
+#   --tier-override=X  Force tier: light, standard, or full
+#   --uninstall        Remove everything pi-bootstrap installed
+#   --help             Show this help
+#
+# THREE TIERS:
+#   light    — <1GB RAM: minimal prompt, lean plugins, ASCII mode
+#   standard — 1-4GB RAM: full p10k prompt, nerdfont, btop
+#   full     — >=4GB AND arm64: starship, eza, delta, dust, glow, lazygit,
+#              lazydocker, fastfetch, zellij — the whole enchilada
+#
+# ARCHITECTURE:
+#   - Antidote plugin manager (NOT oh-my-zsh)
+#   - Starship prompt on full tier, Powerlevel10k on light/standard
+#   - tmux on all tiers, Zellij on full tier (arm64 only)
+#   - Catppuccin Mocha theme across all tools
+#   - Modular aliases in ~/.config/zsh/aliases/
+#
+# DOMAIN: lab.hoens.fun
 #===============================================================================
+
+main() {
 
 set -euo pipefail
 
 #-------------------------------------------------------------------------------
-# PINNED TOOL VERSIONS (update these when upgrading)
+# PINNED TOOL VERSIONS
+# Change these to upgrade. Never use "latest" — reproducibility matters.
 #-------------------------------------------------------------------------------
 PIN_ZELLIJ="v0.41.2"
 PIN_EZA="v0.20.14"
@@ -38,15 +57,11 @@ PIN_FASTFETCH="2.31.0"
 #-------------------------------------------------------------------------------
 # CONFIGURATION
 #-------------------------------------------------------------------------------
-VERSION="20"
+VERSION=20
 BACKUP_DIR="$HOME/.pi-bootstrap-backups/$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="$HOME/.adhd-bootstrap.log"
 
-# Tier thresholds
-TIER_LIGHT_MAX_MB=900
-TIER_STANDARD_MAX_MB=3800
-
-# Colors
+# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -60,61 +75,76 @@ DIM='\033[2m'
 declare -A STATUS
 FAILURES=0
 
-# Globals set by detect_system
-PI_MODEL="" PI_SOC="" RAM_MB=0 TIER="" DPKG_ARCH="" UNAME_ARCH=""
-OS_NAME="" OS_VERSION_ID="" KERNEL="" BITS=0 HAS_PCIE=false BOOT_CONFIG=""
+# Globals populated by detect_system
+PI_MODEL=""
+PI_SOC=""
+RAM_MB=0
+DPKG_ARCH=""
+UNAME_ARCH=""
+OS_NAME=""
+OS_VERSION_ID=""
+OS_VERSION_CODENAME=""
+KERNEL=""
+TIER=""
+HAS_PCIE=false
+BOOT_CONFIG=""
 
 #-------------------------------------------------------------------------------
 # PARSE ARGUMENTS
 #-------------------------------------------------------------------------------
-DRY_RUN=false
 DO_OPTIMIZE=false
 DO_UPDATE=false
 DO_CHSH=true
 DO_MOTD=true
 INFO_ONLY=false
+DRY_RUN=false
 TIER_OVERRIDE=""
+DO_UNINSTALL=false
 
-parse_args() {
-    for arg in "$@"; do
-        case "$arg" in
-            --optimize)        DO_OPTIMIZE=true ;;
-            --update-os)       DO_UPDATE=true ;;
-            --no-chsh)         DO_CHSH=false ;;
-            --no-motd)         DO_MOTD=false ;;
-            --info-only)       INFO_ONLY=true ;;
-            --dry-run)         DRY_RUN=true ;;
-            --tier-override=*) TIER_OVERRIDE="${arg#*=}" ;;
-            --uninstall)       uninstall_bootstrap; exit $? ;;
-            --help|-h)         show_help; exit 0 ;;
-            *)                 echo -e "${YELLOW}Unknown flag: $arg${NC}" >&2 ;;
-        esac
-    done
-}
+for arg in "$@"; do
+    case $arg in
+        --optimize)          DO_OPTIMIZE=true ;;
+        --update-os)         DO_UPDATE=true ;;
+        --no-chsh)           DO_CHSH=false ;;
+        --no-motd)           DO_MOTD=false ;;
+        --info-only)         INFO_ONLY=true ;;
+        --dry-run)           DRY_RUN=true ;;
+        --tier-override=*)   TIER_OVERRIDE="${arg#*=}" ;;
+        --uninstall)         DO_UNINSTALL=true ;;
+        --help|-h)
+            cat <<HELPEOF
+Usage: $0 [FLAGS]
 
-show_help() {
-    cat <<EOF
-Usage: $(basename "$0") [OPTIONS]
-
-ADHD-Friendly Shell Bootstrap for Raspberry Pi (v${VERSION})
-
-Options:
-  --optimize          Apply safe system tweaks (swappiness, journald, PCIe Gen 3)
-  --update-os         Run apt upgrade before installing (kernel/firmware held)
+Flags:
+  --optimize          Apply safe system tweaks (swappiness, journald, PCIe)
+  --update-os         Run apt update/upgrade (kernel packages held)
   --no-chsh           Don't change default shell to zsh
   --no-motd           Don't install custom MOTD
-  --info-only         Print system diagnostics and exit
-  --dry-run           Show what would be installed without doing it
+  --info-only         Just print system info and exit
+  --dry-run           Show what would happen without making changes
   --tier-override=X   Force tier: light, standard, or full
-  --uninstall         Remove pi-bootstrap configs (restores backups, keeps packages)
-  --help              Show this help message
+  --uninstall         Remove everything pi-bootstrap installed
+  --help              Show this help
 
-Tiers (auto-detected):
-  light     <1GB RAM (Pi Zero, Pi 1)        — P10k, tmux, minimal tools
-  standard  1-4GB RAM (Pi 2/3/4)            — P10k, tmux, btop
-  full      >=4GB RAM + arm64 (Pi 4+, Pi 5) — Starship, Zellij, full toolkit
-EOF
-}
+Tiers:
+  light     <1GB RAM: minimal prompt, lean plugins
+  standard  1-4GB RAM: full p10k, nerdfont, btop
+  full      >=4GB + arm64: starship, eza, delta, zellij, etc.
+
+HELPEOF
+            return 0
+            ;;
+        *) echo -e "${YELLOW}Warning: Unknown flag: $arg${NC}" >&2 ;;
+    esac
+done
+
+# Validate tier override
+if [[ -n "$TIER_OVERRIDE" ]]; then
+    case "$TIER_OVERRIDE" in
+        light|standard|full) : ;;
+        *) echo -e "${RED}Error: --tier-override must be light, standard, or full${NC}" >&2; return 1 ;;
+    esac
+fi
 
 #-------------------------------------------------------------------------------
 # LOGGING HELPERS
@@ -124,40 +154,45 @@ log() {
 }
 
 success() {
-    echo -e "${GREEN}✓${NC} $*" | tee -a "$LOG_FILE"
+    echo -e "${GREEN}[ok]${NC} $*" | tee -a "$LOG_FILE"
 }
 
 warn() {
-    echo -e "${YELLOW}⚠${NC} $*" | tee -a "$LOG_FILE"
+    echo -e "${YELLOW}[!!]${NC} $*" | tee -a "$LOG_FILE"
 }
 
 error() {
-    echo -e "${RED}✗${NC} $*" | tee -a "$LOG_FILE"
+    echo -e "${RED}[ERR]${NC} $*" | tee -a "$LOG_FILE"
 }
 
 header() {
     echo "" | tee -a "$LOG_FILE"
-    echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════${NC}" | tee -a "$LOG_FILE"
+    echo -e "${BOLD}${CYAN}======================================================================${NC}" | tee -a "$LOG_FILE"
     echo -e "${BOLD}${CYAN}  $*${NC}" | tee -a "$LOG_FILE"
-    echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════${NC}" | tee -a "$LOG_FILE"
+    echo -e "${BOLD}${CYAN}======================================================================${NC}" | tee -a "$LOG_FILE"
 }
 
-# Spinner — run a command with an animated progress indicator
+# Spinner — run a command with animated braille progress indicator
+# Usage: spin "Descriptive label" command arg1 arg2 ...
+# Returns the command's exit code. Output goes to log file.
+# DRY_RUN aware: prints label and returns 0 without running.
 spin() {
     local label="$1"
     shift
 
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] $label"
+        echo -e "  ${CYAN}[DRY RUN]${NC} $label" | tee -a "$LOG_FILE"
         return 0
     fi
 
-    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local frames=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
     local start=$SECONDS
 
+    # Run command in background, redirect output to log
     ( "$@" ) >> "$LOG_FILE" 2>&1 &
     local pid=$!
 
+    # Animate while process runs
     local i=0
     while kill -0 "$pid" 2>/dev/null; do
         local elapsed=$(( SECONDS - start ))
@@ -167,12 +202,14 @@ spin() {
         sleep 0.1
     done
 
+    # Get exit code
     local rc=0
     wait "$pid" || rc=$?
     local elapsed=$(( SECONDS - start ))
     local mins=$(( elapsed / 60 ))
     local secs=$(( elapsed % 60 ))
 
+    # Clear spinner line and print result
     printf "\r%-${COLUMNS:-80}s\r" ""
     if [[ $rc -eq 0 ]]; then
         success "$label ${DIM}(${mins}m ${secs}s)${NC}"
@@ -183,107 +220,24 @@ spin() {
     return $rc
 }
 
+# Track step status
 track_status() {
     local step="$1"
-    local result="$2"
+    local result="$2"  # "OK" or "FAIL" or "SKIP"
     STATUS["$step"]="$result"
     if [[ "$result" == "FAIL" ]]; then
         ((FAILURES++)) || true
     fi
 }
 
-#-------------------------------------------------------------------------------
-# IDEMPOTENT HELPERS
-#-------------------------------------------------------------------------------
-install_if_missing() {
-    local cmd="$1"
-    shift
-    if command -v "$cmd" &>/dev/null; then
-        success "$cmd already installed"
-        return 0
-    fi
-    if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would install $cmd"
-        return 0
-    fi
-    "$@"
-}
-
-ensure_line_in_file() {
-    local line="$1" file="$2"
-    grep -qF "$line" "$file" 2>/dev/null || echo "$line" >> "$file"
-}
-
-# Download a binary from a GitHub release
-# Usage: download_github_release repo version asset_pattern binary_name [install_dir]
-download_github_release() {
-    local repo="$1" version="$2" asset="$3" binary="$4"
-    local dest="${5:-/usr/local/bin}"
-    local url="https://github.com/${repo}/releases/download/${version}/${asset}"
-    local tmp_dir
-    tmp_dir=$(mktemp -d)
-
-    if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would download $repo $version ($asset)"
-        return 0
-    fi
-
-    log "Downloading $repo $version..."
-    if ! curl -fsSL "$url" -o "$tmp_dir/$asset"; then
-        error "Failed to download $url"
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-
-    case "$asset" in
-        *.tar.gz|*.tgz)
-            tar -xzf "$tmp_dir/$asset" -C "$tmp_dir"
-            # Find the binary — might be in a subdirectory
-            local found
-            found=$(find "$tmp_dir" -name "$binary" -type f -executable 2>/dev/null | head -1)
-            if [[ -z "$found" ]]; then
-                found=$(find "$tmp_dir" -name "$binary" -type f 2>/dev/null | head -1)
-            fi
-            if [[ -n "$found" ]]; then
-                sudo install -m 755 "$found" "$dest/$binary"
-            else
-                error "Binary '$binary' not found in archive"
-                rm -rf "$tmp_dir"
-                return 1
-            fi
-            ;;
-        *.deb)
-            sudo dpkg -i "$tmp_dir/$asset" || sudo apt-get install -f -y
-            ;;
-        *.zip)
-            unzip -o "$tmp_dir/$asset" -d "$tmp_dir"
-            local found
-            found=$(find "$tmp_dir" -name "$binary" -type f 2>/dev/null | head -1)
-            if [[ -n "$found" ]]; then
-                sudo install -m 755 "$found" "$dest/$binary"
-            fi
-            ;;
-        *)
-            sudo install -m 755 "$tmp_dir/$asset" "$dest/$binary"
-            ;;
-    esac
-
-    rm -rf "$tmp_dir"
-    success "Installed $binary"
-}
 
 #-------------------------------------------------------------------------------
-# SYSTEM DETECTION
+# HARDWARE DETECTION
 #-------------------------------------------------------------------------------
 detect_system() {
     header "DETECTING HARDWARE"
 
-    # Architecture — use dpkg for userland arch (Pi can run 64-bit kernel with 32-bit userland)
-    DPKG_ARCH=$(dpkg --print-architecture 2>/dev/null || echo "unknown")
-    UNAME_ARCH=$(uname -m)
-    log "Architecture: $DPKG_ARCH (kernel: $UNAME_ARCH)"
-
-    # Pi Model
+    # Pi model from device tree
     if [[ -f /proc/device-tree/model ]]; then
         PI_MODEL=$(tr -d '\0' < /proc/device-tree/model)
     elif grep -q "Model" /proc/cpuinfo 2>/dev/null; then
@@ -293,34 +247,43 @@ detect_system() {
     fi
     log "Model: $PI_MODEL"
 
-    # SoC detection via device-tree compatible string
+    # SoC detection from device tree compatible string
     if [[ -f /proc/device-tree/compatible ]]; then
         local compat
-        compat=$(tr -d '\0' < /proc/device-tree/compatible)
+        compat=$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -5 | tr '\n' ' ')
         case "$compat" in
-            *bcm2712*) PI_SOC="bcm2712" ;;  # Pi 5
-            *bcm2711*) PI_SOC="bcm2711" ;;  # Pi 4
-            *bcm2837*) PI_SOC="bcm2837" ;;  # Pi 3 / Zero 2W
-            *bcm2836*) PI_SOC="bcm2836" ;;  # Pi 2
-            *bcm2835*) PI_SOC="bcm2835" ;;  # Pi 1 / Zero
-            *)         PI_SOC="unknown"  ;;
+            *bcm2712*) PI_SOC="bcm2712 (Pi 5)" ;;
+            *bcm2711*) PI_SOC="bcm2711 (Pi 4)" ;;
+            *bcm2837*) PI_SOC="bcm2837 (Pi 3/Zero 2W)" ;;
+            *bcm2836*) PI_SOC="bcm2836 (Pi 2)" ;;
+            *bcm2835*) PI_SOC="bcm2835 (Pi 1/Zero)" ;;
+            *)         PI_SOC="unknown ($compat)" ;;
         esac
     else
-        PI_SOC="unknown"
+        PI_SOC="unknown (no device-tree)"
     fi
     log "SoC: $PI_SOC"
 
-    # RAM
-    RAM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+    # RAM in MB
+    local ram_kb
+    ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    RAM_MB=$((ram_kb / 1024))
     log "RAM: ${RAM_MB} MB"
 
-    # OS Info
+    # Architecture — dpkg for package decisions, uname for binary downloads
+    DPKG_ARCH=$(dpkg --print-architecture 2>/dev/null || echo "unknown")
+    UNAME_ARCH=$(uname -m)
+    log "Architecture: dpkg=$DPKG_ARCH uname=$UNAME_ARCH"
+
+    # OS info
     if [[ -f /etc/os-release ]]; then
         OS_NAME=$(. /etc/os-release && echo "${PRETTY_NAME:-Unknown}")
         OS_VERSION_ID=$(. /etc/os-release && echo "${VERSION_ID:-unknown}")
+        OS_VERSION_CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-unknown}")
     else
         OS_NAME="Unknown"
         OS_VERSION_ID="unknown"
+        OS_VERSION_CODENAME="unknown"
     fi
     log "OS: $OS_NAME"
 
@@ -328,36 +291,21 @@ detect_system() {
     KERNEL=$(uname -r)
     log "Kernel: $KERNEL"
 
-    # Bits
-    if [[ "$DPKG_ARCH" == "arm64" ]]; then
-        BITS=64
-    else
-        BITS=32
-    fi
-    log "Bits: $BITS"
-
     # Storage
     read -r ROOT_SIZE ROOT_AVAIL ROOT_USED_PCT <<< "$(df -h / | awk 'NR==2 {print $2, $4, $5}')"
     log "Root filesystem: $ROOT_SIZE total, $ROOT_AVAIL available ($ROOT_USED_PCT used)"
 
-    # Tier selection
+    # 3-tier logic
     if [[ -n "$TIER_OVERRIDE" ]]; then
         TIER="$TIER_OVERRIDE"
-        log "Tier override: $TIER"
-    elif [[ $RAM_MB -le $TIER_LIGHT_MAX_MB ]]; then
-        TIER="light"
-    elif [[ $RAM_MB -le $TIER_STANDARD_MAX_MB ]]; then
+        log "Tier override: ${BOLD}$TIER${NC}"
+    elif [[ $RAM_MB -ge 4000 && "$DPKG_ARCH" == "arm64" ]]; then
+        TIER="full"
+    elif [[ $RAM_MB -ge 1000 ]]; then
         TIER="standard"
     else
-        TIER="full"
+        TIER="light"
     fi
-
-    # Downgrade full to standard on 32-bit
-    if [[ "$TIER" == "full" && "$DPKG_ARCH" != "arm64" ]]; then
-        TIER="standard"
-        log "Downgraded to standard tier (32-bit userland)"
-    fi
-
     log "Selected tier: ${BOLD}$TIER${NC}"
 
     # PCIe detection
@@ -375,6 +323,7 @@ detect_system() {
     else
         BOOT_CONFIG=""
     fi
+    log "Boot config: ${BOOT_CONFIG:-not found}"
 
     track_status "Hardware Detection" "OK"
 }
@@ -385,9 +334,11 @@ detect_system() {
 detect_extended_hardware() {
     log "Gathering extended system info..."
 
+    # CPU info
     CPU_CORES=$(nproc 2>/dev/null || echo "?")
     CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo "ARM")
 
+    # Temperature
     if [[ -f /sys/class/thermal/thermal_zone0/temp ]]; then
         local temp_raw
         temp_raw=$(cat /sys/class/thermal/thermal_zone0/temp)
@@ -396,45 +347,74 @@ detect_extended_hardware() {
         TEMP_C="N/A"
     fi
 
+    # Throttling status
     if command -v vcgencmd &>/dev/null; then
         THROTTLE_STATUS=$(timeout 3 vcgencmd get_throttled 2>/dev/null | cut -d= -f2 || echo "N/A")
     else
         THROTTLE_STATUS="vcgencmd not available"
     fi
 
+    # Camera detection
     if compgen -G "/dev/video*" > /dev/null 2>&1; then
         CAMERA_DEVICES=$(ls /dev/video* 2>/dev/null | tr '\n' ' ')
-        [[ -z "$CAMERA_DEVICES" ]] && CAMERA_DEVICES="none"
+        [[ -z "$CAMERA_DEVICES" ]] && CAMERA_DEVICES="none detected"
     else
-        CAMERA_DEVICES="none"
+        CAMERA_DEVICES="none detected"
     fi
-
     if command -v libcamera-hello &>/dev/null; then
         LIBCAMERA="installed"
     else
         LIBCAMERA="not installed"
     fi
 
+    # I2C status
     if [[ -e /dev/i2c-1 ]]; then
         I2C_STATUS="enabled"
+        if command -v i2cdetect &>/dev/null; then
+            I2C_DEVICES=$(timeout 3 i2cdetect -y 1 2>/dev/null | grep -c "^[0-9]" || echo "0")
+            I2C_DEVICES="${I2C_DEVICES} bus(es) scanned"
+        else
+            I2C_DEVICES="i2c-tools not installed"
+        fi
     else
         I2C_STATUS="disabled"
+        I2C_DEVICES="N/A"
     fi
 
+    # SPI status
     if [[ -e /dev/spidev0.0 ]]; then
         SPI_STATUS="enabled"
     else
         SPI_STATUS="disabled"
     fi
 
+    # GPIO status
     if [[ -d /sys/class/gpio ]]; then
         GPIO_STATUS="available"
     else
         GPIO_STATUS="not available"
     fi
 
+    # USB devices
+    if command -v lsusb &>/dev/null; then
+        USB_DEVICES=$(timeout 5 lsusb 2>/dev/null | wc -l || echo "0")
+        USB_DEVICE_LIST=$(timeout 5 lsusb 2>/dev/null | grep -vi "hub" | head -5 || echo "none")
+    else
+        USB_DEVICES="lsusb not available"
+        USB_DEVICE_LIST=""
+    fi
+
+    # Network interfaces
     NET_INTERFACES=$(timeout 3 ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -v lo | tr '\n' ' ' || echo "unknown")
 
+    # WiFi
+    if command -v iwconfig &>/dev/null; then
+        WIFI_INTERFACE=$(timeout 3 iwconfig 2>/dev/null | grep -o "^wlan[0-9]" | head -1 || echo "none")
+    else
+        WIFI_INTERFACE=$(timeout 3 ip link show 2>/dev/null | grep -o "wlan[0-9]" | head -1 || echo "none")
+    fi
+
+    # Bluetooth
     if command -v bluetoothctl &>/dev/null; then
         BT_STATUS="available"
     elif [[ -d /sys/class/bluetooth ]]; then
@@ -443,7 +423,8 @@ detect_extended_hardware() {
         BT_STATUS="not detected"
     fi
 
-    if [[ -n "${BOOT_CONFIG:-}" ]] && [[ -f "$BOOT_CONFIG" ]]; then
+    # Boot overlays
+    if [[ -n "${BOOT_CONFIG:-}" && -f "$BOOT_CONFIG" ]]; then
         BOOT_OVERLAYS=$(grep "^dtoverlay=" "$BOOT_CONFIG" 2>/dev/null | cut -d= -f2 | tr '\n' ', ' || echo "none")
         [[ -z "$BOOT_OVERLAYS" ]] && BOOT_OVERLAYS="none configured"
     else
@@ -451,24 +432,28 @@ detect_extended_hardware() {
     fi
 }
 
+#-------------------------------------------------------------------------------
+# PRINT SYSTEM INFO (--info-only diagnostic dump)
+#-------------------------------------------------------------------------------
 print_system_info() {
     detect_system
     detect_extended_hardware
 
-    header "SYSTEM INFO"
+    header "SYSTEM INFO — PASTE THIS BACK TO COSMO"
 
     cat <<EOF
 
 \`\`\`
-═══════════════════════════════════════════════════════════
+======================================================================
 SYSTEM PROFILE — $(date -Iseconds)
-═══════════════════════════════════════════════════════════
+======================================================================
 
 HARDWARE
 --------
 PI_MODEL:     $PI_MODEL
 PI_SOC:       $PI_SOC
-ARCH:         $DPKG_ARCH (kernel: $UNAME_ARCH, ${BITS}-bit)
+DPKG_ARCH:    $DPKG_ARCH
+UNAME_ARCH:   $UNAME_ARCH
 CPU:          $CPU_MODEL ($CPU_CORES cores)
 RAM_MB:       $RAM_MB
 TEMP:         ${TEMP_C}°C
@@ -477,9 +462,9 @@ TIER:         $TIER
 
 STORAGE
 -------
-ROOT_SIZE:    ${ROOT_SIZE:-?}
-ROOT_AVAIL:   ${ROOT_AVAIL:-?}
-ROOT_USED:    ${ROOT_USED_PCT:-?}
+ROOT_SIZE:    $ROOT_SIZE
+ROOT_AVAIL:   $ROOT_AVAIL
+ROOT_USED:    $ROOT_USED_PCT
 
 OS
 --
@@ -491,29 +476,179 @@ BOOT_CONFIG:  ${BOOT_CONFIG:-not found}
 
 INTERFACES
 ----------
-I2C:          $I2C_STATUS
+I2C:          $I2C_STATUS ($I2C_DEVICES)
 SPI:          $SPI_STATUS
 GPIO:         $GPIO_STATUS
 PCIe:         $HAS_PCIE
 NETWORK:      $NET_INTERFACES
+WIFI:         $WIFI_INTERFACE
 BLUETOOTH:    $BT_STATUS
 
 PERIPHERALS
 -----------
 CAMERA:       $CAMERA_DEVICES
 LIBCAMERA:    $LIBCAMERA
+USB_DEVICES:  $USB_DEVICES
 OVERLAYS:     $BOOT_OVERLAYS
-═══════════════════════════════════════════════════════════
+
+USB DEVICE LIST:
+$USB_DEVICE_LIST
+======================================================================
 \`\`\`
 
 EOF
+
+    # Pi 5 specific info
+    if [[ "${PI_MODEL,,}" =~ pi\ 5 ]]; then
+        echo "--- Pi 5 Specific ---"
+        if [[ -n "$BOOT_CONFIG" && -f "$BOOT_CONFIG" ]]; then
+            echo "PCIe config:"
+            grep -i pcie "$BOOT_CONFIG" 2>/dev/null || echo "(no pcie settings found)"
+        fi
+    fi
+}
+
+
+#-------------------------------------------------------------------------------
+# IDEMPOTENT HELPERS
+#-------------------------------------------------------------------------------
+
+# Check if a command exists before trying to install
+install_if_missing() {
+    local cmd="$1"
+    shift
+    if command -v "$cmd" &>/dev/null; then
+        success "$cmd already installed"
+        return 0
+    fi
+    "$@"
+}
+
+# Check dpkg -s for each package, batch-install the missing ones
+ensure_apt_packages() {
+    local label="$1"
+    shift
+    local missing=()
+
+    for pkg in "$@"; do
+        if ! dpkg -s "$pkg" &>/dev/null; then
+            missing+=("$pkg")
+        fi
+    done
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        success "$label: all ${#@} packages already installed"
+        return 0
+    fi
+
+    log "$label: installing ${#missing[@]} missing package(s): ${missing[*]}"
+    spin "$label (${#missing[@]} packages)" \
+        "${APT_ENV[@]}" apt-get install -y -qq "${APT_DPKG_OPTS[@]}" "${missing[@]}"
+}
+
+# Add a line to a file only if it doesn't already exist
+ensure_line_in_file() {
+    local file="$1"
+    local line="$2"
+    if [[ -f "$file" ]] && grep -qF "$line" "$file" 2>/dev/null; then
+        return 0
+    fi
+    echo "$line" >> "$file"
+}
+
+# Architecture-aware GitHub binary downloader
+# Usage: download_github_release repo version asset_pattern binary_name install_dir
+#   repo          — e.g., "eza-community/eza"
+#   version       — e.g., "v0.20.14"
+#   asset_pattern — e.g., "eza_aarch64-unknown-linux-gnu.tar.gz" (use UNAME_ARCH)
+#   binary_name   — e.g., "eza" (name of binary inside archive or the raw binary)
+#   install_dir   — e.g., "/usr/local/bin"
+#
+# Handles: .tar.gz (extract + find binary), .deb (dpkg -i), raw binary
+# Skips if binary already exists at correct version
+download_github_release() {
+    local repo="$1"
+    local version="$2"
+    local asset_pattern="$3"
+    local binary_name="$4"
+    local install_dir="${5:-/usr/local/bin}"
+
+    # Skip if binary exists and version matches
+    if command -v "$binary_name" &>/dev/null; then
+        local current_ver
+        current_ver=$("$binary_name" --version 2>/dev/null | head -1 || echo "")
+        # Strip leading 'v' for comparison
+        local pin_clean="${version#v}"
+        if [[ "$current_ver" == *"$pin_clean"* ]]; then
+            success "$binary_name $version already installed"
+            return 0
+        fi
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would download $binary_name $version from $repo" | tee -a "$LOG_FILE"
+        return 0
+    fi
+
+    local url="https://github.com/${repo}/releases/download/${version}/${asset_pattern}"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    local tmpfile="${tmpdir}/${asset_pattern}"
+
+    log "Downloading $binary_name $version from $repo..."
+    if ! curl -fsSL -o "$tmpfile" "$url" 2>>"$LOG_FILE"; then
+        error "Failed to download $binary_name from $url"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # Handle based on file type
+    case "$asset_pattern" in
+        *.deb)
+            sudo dpkg -i "$tmpfile" >> "$LOG_FILE" 2>&1 || {
+                # Try to fix dependencies
+                sudo apt-get install -f -y -qq >> "$LOG_FILE" 2>&1
+            }
+            ;;
+        *.tar.gz|*.tgz)
+            tar xzf "$tmpfile" -C "$tmpdir" >> "$LOG_FILE" 2>&1
+            # Find the binary in the extracted contents
+            local found_bin
+            found_bin=$(find "$tmpdir" -name "$binary_name" -type f -executable 2>/dev/null | head -1)
+            if [[ -z "$found_bin" ]]; then
+                # Try non-executable files (some archives don't set +x)
+                found_bin=$(find "$tmpdir" -name "$binary_name" -type f 2>/dev/null | head -1)
+            fi
+            if [[ -n "$found_bin" ]]; then
+                sudo install -m 755 "$found_bin" "${install_dir}/${binary_name}"
+            else
+                error "Could not find $binary_name binary in archive"
+                rm -rf "$tmpdir"
+                return 1
+            fi
+            ;;
+        *)
+            # Raw binary
+            sudo install -m 755 "$tmpfile" "${install_dir}/${binary_name}"
+            ;;
+    esac
+
+    rm -rf "$tmpdir"
+    success "$binary_name $version installed to $install_dir"
+    return 0
 }
 
 #-------------------------------------------------------------------------------
-# BACKUP EXISTING CONFIGS
+# BACKUP CONFIGS
 #-------------------------------------------------------------------------------
 backup_configs() {
     header "BACKING UP EXISTING CONFIGS"
+
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would back up configs to $BACKUP_DIR" | tee -a "$LOG_FILE"
+        track_status "Backup Configs" "SKIP"
+        return 0
+    fi
 
     mkdir -p "$BACKUP_DIR"
 
@@ -528,12 +663,8 @@ backup_configs() {
     local backed_up=0
     for file in "${files_to_backup[@]}"; do
         if [[ -f "$file" ]]; then
-            if [[ "$DRY_RUN" == true ]]; then
-                log "[DRY RUN] Would back up: $file"
-            else
-                cp "$file" "$BACKUP_DIR/"
-                success "Backed up: $file"
-            fi
+            cp "$file" "$BACKUP_DIR/"
+            success "Backed up: $file"
             ((backed_up++)) || true
         fi
     done
@@ -543,18 +674,20 @@ backup_configs() {
     if [[ $backed_up -gt 0 ]]; then
         track_status "Backup Configs" "OK"
     else
+        log "No existing configs to back up"
         track_status "Backup Configs" "SKIP"
     fi
 }
 
 #-------------------------------------------------------------------------------
-# VERIFY TIME SYNC
+# VERIFY TIME SYNC (clock drift breaks TLS, apt signatures, logs)
 #-------------------------------------------------------------------------------
 verify_time_sync() {
     header "VERIFYING TIME SYNC"
 
     local sync_ok=false
 
+    # Check systemd-timesyncd
     if timedatectl show --property=NTP --value 2>/dev/null | grep -qi "yes"; then
         local synced
         synced=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || echo "no")
@@ -562,15 +695,19 @@ verify_time_sync() {
             success "Time synced via systemd-timesyncd"
             sync_ok=true
         else
-            warn "timesyncd active but not yet synchronized"
+            warn "timesyncd active but not yet synchronized — may need a moment"
         fi
     elif systemctl is-active --quiet chronyd 2>/dev/null; then
         success "Time synced via chrony"
         sync_ok=true
     else
         warn "NTP not active — enabling systemd-timesyncd..."
-        if [[ "$DRY_RUN" != true ]]; then
-            sudo timedatectl set-ntp true 2>/dev/null && success "timesyncd enabled" || warn "Could not enable NTP"
+        if [[ "$DRY_RUN" == true ]]; then
+            echo -e "  ${CYAN}[DRY RUN]${NC} Would enable systemd-timesyncd" | tee -a "$LOG_FILE"
+        elif sudo timedatectl set-ntp true 2>/dev/null; then
+            success "systemd-timesyncd enabled (will sync shortly)"
+        else
+            warn "Could not enable NTP — clock may drift"
         fi
     fi
 
@@ -590,9 +727,13 @@ APT_ENV=(sudo env DEBIAN_FRONTEND=noninteractive)
 APT_DPKG_OPTS=(-o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef)
 
 KERNEL_HOLD_PKGS=(
-    raspberrypi-kernel raspberrypi-kernel-headers raspberrypi-bootloader
-    linux-image-rpi-v8 linux-image-rpi-2712
-    linux-headers-rpi-v8 linux-headers-rpi-2712
+    raspberrypi-kernel
+    raspberrypi-kernel-headers
+    raspberrypi-bootloader
+    linux-image-rpi-v8
+    linux-image-rpi-2712
+    linux-headers-rpi-v8
+    linux-headers-rpi-2712
 )
 
 update_os() {
@@ -604,22 +745,30 @@ update_os() {
         return 0
     fi
 
-    # Hold kernel packages
+    # Hold kernel packages to prevent DKMS breakage
     log "Holding kernel/firmware packages..."
     local held=()
     for pkg in "${KERNEL_HOLD_PKGS[@]}"; do
         if dpkg -l "$pkg" &>/dev/null; then
-            sudo apt-mark hold "$pkg" &>/dev/null && held+=("$pkg")
+            if [[ "$DRY_RUN" == true ]]; then
+                echo -e "  ${CYAN}[DRY RUN]${NC} Would hold $pkg" | tee -a "$LOG_FILE"
+            else
+                sudo apt-mark hold "$pkg" &>/dev/null && held+=("$pkg")
+            fi
         fi
     done
-    [[ ${#held[@]} -gt 0 ]] && success "Held ${#held[@]} kernel pkg(s)"
+    if [[ ${#held[@]} -gt 0 ]]; then
+        success "Held ${#held[@]} kernel pkg(s): ${held[*]}"
+    fi
 
+    # Update package lists
     if ! spin "Refreshing package lists" \
         "${APT_ENV[@]}" apt-get update -qq; then
         track_status "OS Update" "FAIL"
         return 1
     fi
 
+    # Upgrade packages
     if ! spin "Upgrading packages" \
         "${APT_ENV[@]}" apt-get upgrade -y -qq "${APT_DPKG_OPTS[@]}"; then
         track_status "OS Update" "FAIL"
@@ -627,149 +776,177 @@ update_os() {
     fi
     track_status "OS Update" "OK"
 
-    [[ -f /var/run/reboot-required ]] && warn "Reboot required after updates"
+    # Check if reboot needed
+    if [[ -f /var/run/reboot-required ]]; then
+        warn "Reboot required after updates"
+    fi
 }
 
+
 #-------------------------------------------------------------------------------
-# INSTALL PACKAGES
+# PACKAGE INSTALLATION — CORE (all tiers)
 #-------------------------------------------------------------------------------
 install_core_packages() {
     header "INSTALLING CORE PACKAGES"
 
-    # Ensure package lists are fresh
+    # Ensure package lists are fresh if update_os didn't run
     if [[ "$DO_UPDATE" == false ]]; then
-        if ! spin "Refreshing package lists" \
-            "${APT_ENV[@]}" apt-get update -qq; then
-            track_status "Core Packages" "FAIL"
-            return 1
-        fi
+        spin "Refreshing package lists" \
+            "${APT_ENV[@]}" apt-get update -qq || true
     fi
 
-    local packages=(
-        zsh git curl wget fontconfig tmux fzf jq stow figlet fortune-mod tree
-        bat fd-find ripgrep htop ncdu duf tealdeer
-        neovim sqlite3 python3-venv
+    local core_packages=(
+        zsh
+        git
+        curl
+        wget
+        fontconfig
+        tmux
+        fzf
+        jq
+        stow
+        figlet
+        fortune-mod
+        tree
+        bat
+        fd-find
+        ripgrep
+        htop
+        ncdu
+        duf
+        tealdeer
+        neovim
+        sqlite3
+        python3-venv
     )
 
-    log "Installing: ${packages[*]}"
-    if spin "Installing core packages (${#packages[@]} items)" \
-        "${APT_ENV[@]}" apt-get install -y -qq "${APT_DPKG_OPTS[@]}" "${packages[@]}"; then
-        track_status "Core Packages" "OK"
-    else
-        track_status "Core Packages" "FAIL"
+    if ! ensure_apt_packages "Core packages" "${core_packages[@]}"; then
+        track_status "Install Packages" "FAIL"
         return 1
     fi
 
-    # Create convenience symlinks for Debian-renamed packages
+    # Create symlinks for Debian-renamed binaries
     if [[ "$DRY_RUN" != true ]]; then
-        [[ ! -L /usr/local/bin/bat ]] && [[ -f /usr/bin/batcat ]] && \
-            sudo ln -sfn /usr/bin/batcat /usr/local/bin/bat 2>/dev/null || true
-        [[ ! -L /usr/local/bin/fd ]] && [[ -f /usr/bin/fdfind ]] && \
-            sudo ln -sfn /usr/bin/fdfind /usr/local/bin/fd 2>/dev/null || true
-    fi
-}
-
-install_standard_packages() {
-    [[ "$TIER" == "light" ]] && return 0
-    header "INSTALLING STANDARD-TIER PACKAGES"
-
-    if spin "Installing btop" \
-        "${APT_ENV[@]}" apt-get install -y -qq btop; then
-        success "btop installed"
+        if command -v batcat &>/dev/null && [[ ! -e /usr/local/bin/bat ]]; then
+            sudo ln -sf "$(command -v batcat)" /usr/local/bin/bat
+            success "Created symlink: bat -> batcat"
+        fi
+        if command -v fdfind &>/dev/null && [[ ! -e /usr/local/bin/fd ]]; then
+            sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+            success "Created symlink: fd -> fdfind"
+        fi
     else
-        warn "btop install failed (non-critical)"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would create bat/fd symlinks" | tee -a "$LOG_FILE"
     fi
+
+    track_status "Install Packages" "OK"
 }
 
-install_full_packages() {
-    if [[ "$TIER" != "full" ]]; then
-        track_status "Full Packages" "SKIP"
+#-------------------------------------------------------------------------------
+# PACKAGE INSTALLATION — STANDARD (standard + full tiers)
+#-------------------------------------------------------------------------------
+install_standard_packages() {
+    if [[ "$TIER" == "light" ]]; then
         return 0
     fi
-    header "INSTALLING FULL-TIER PACKAGES"
 
-    # eza
-    if ! command -v eza &>/dev/null; then
-        local eza_asset="eza_${UNAME_ARCH}-unknown-linux-gnu.tar.gz"
-        spin "Installing eza" \
-            download_github_release "eza-community/eza" "$PIN_EZA" "$eza_asset" "eza" || \
-            warn "eza install failed (non-critical)"
-    else
-        success "eza already installed"
-    fi
+    header "INSTALLING STANDARD TIER PACKAGES"
 
-    # delta
-    if ! command -v delta &>/dev/null; then
-        local delta_asset="git-delta_${PIN_DELTA}_${DPKG_ARCH}.deb"
-        spin "Installing delta" \
-            download_github_release "dandavison/delta" "$PIN_DELTA" "$delta_asset" "delta" || \
-            warn "delta install failed (non-critical)"
-    else
-        success "delta already installed"
-    fi
+    local std_packages=(
+        btop
+    )
 
-    # dust
-    if ! command -v dust &>/dev/null; then
-        local dust_arch="$UNAME_ARCH"
-        local dust_asset="dust-${PIN_DUST}-${dust_arch}-unknown-linux-gnu.tar.gz"
-        spin "Installing dust" \
-            download_github_release "bootandy/dust" "$PIN_DUST" "$dust_asset" "dust" || \
-            warn "dust install failed (non-critical)"
-    else
-        success "dust already installed"
-    fi
-
-    # glow
-    if ! command -v glow &>/dev/null; then
-        local glow_arch="arm64"
-        [[ "$DPKG_ARCH" == "armhf" ]] && glow_arch="armv7"
-        local glow_asset="glow_${PIN_GLOW#v}_Linux_${glow_arch}.tar.gz"
-        spin "Installing glow" \
-            download_github_release "charmbracelet/glow" "$PIN_GLOW" "$glow_asset" "glow" || \
-            warn "glow install failed (non-critical)"
-    else
-        success "glow already installed"
-    fi
-
-    # lazygit
-    if ! command -v lazygit &>/dev/null; then
-        local lg_arch="arm64"
-        local lg_asset="lazygit_${PIN_LAZYGIT#v}_Linux_${lg_arch}.tar.gz"
-        spin "Installing lazygit" \
-            download_github_release "jesseduffield/lazygit" "$PIN_LAZYGIT" "$lg_asset" "lazygit" || \
-            warn "lazygit install failed (non-critical)"
-    else
-        success "lazygit already installed"
-    fi
-
-    # lazydocker
-    if ! command -v lazydocker &>/dev/null; then
-        local ld_arch="arm64"
-        local ld_asset="lazydocker_${PIN_LAZYDOCKER#v}_Linux_${ld_arch}.tar.gz"
-        spin "Installing lazydocker" \
-            download_github_release "jesseduffield/lazydocker" "$PIN_LAZYDOCKER" "$ld_asset" "lazydocker" || \
-            warn "lazydocker install failed (non-critical)"
-    else
-        success "lazydocker already installed"
-    fi
-
-    # fastfetch
-    if ! command -v fastfetch &>/dev/null; then
-        local ff_asset="fastfetch-linux-${DPKG_ARCH}.deb"
-        spin "Installing fastfetch" \
-            download_github_release "fastfetch-cli/fastfetch" "$PIN_FASTFETCH" "$ff_asset" "fastfetch" || \
-            warn "fastfetch install failed (non-critical)"
-    else
-        success "fastfetch already installed"
-    fi
-
-    track_status "Full Packages" "OK"
+    ensure_apt_packages "Standard packages" "${std_packages[@]}" || true
 }
 
+#-------------------------------------------------------------------------------
+# PACKAGE INSTALLATION — FULL (full tier, GitHub binaries)
+#-------------------------------------------------------------------------------
+install_full_packages() {
+    if [[ "$TIER" != "full" ]]; then
+        return 0
+    fi
+
+    header "INSTALLING FULL TIER PACKAGES (GitHub binaries)"
+
+    local arch_eza=""
+    local arch_dust=""
+    local arch_glow=""
+    local arch_lazygit=""
+    local arch_lazydocker=""
+
+    case "$UNAME_ARCH" in
+        aarch64)
+            arch_eza="aarch64-unknown-linux-gnu"
+            arch_dust="aarch64-unknown-linux-musl"
+            arch_glow="arm64"
+            arch_lazygit="arm64"
+            arch_lazydocker="arm64"
+            ;;
+        armv7l)
+            arch_eza="armv7-unknown-linux-gnueabihf"
+            arch_dust="armv7-unknown-linux-gnueabihf"
+            arch_glow="armv7"
+            arch_lazygit="armv6"
+            arch_lazydocker="armv7"
+            ;;
+        armv6l)
+            arch_eza="arm-unknown-linux-gnueabihf"
+            arch_dust="arm-unknown-linux-gnueabihf"
+            arch_glow="armv6"
+            arch_lazygit="armv6"
+            arch_lazydocker="armv6"
+            ;;
+        *)
+            warn "Unsupported architecture for full-tier binaries: $UNAME_ARCH"
+            return 1
+            ;;
+    esac
+
+    # eza — modern ls replacement
+    spin "Installing eza $PIN_EZA" \
+        download_github_release "eza-community/eza" "$PIN_EZA" \
+        "eza_${arch_eza}.tar.gz" "eza" "/usr/local/bin" || true
+
+    # delta — better git diff (.deb)
+    spin "Installing delta $PIN_DELTA" \
+        download_github_release "dandavison/delta" "$PIN_DELTA" \
+        "git-delta_${PIN_DELTA}_${DPKG_ARCH}.deb" "delta" "/usr/local/bin" || true
+
+    # dust — better du
+    spin "Installing dust $PIN_DUST" \
+        download_github_release "bootandy/dust" "$PIN_DUST" \
+        "dust-${PIN_DUST}-${arch_dust}.tar.gz" "dust" "/usr/local/bin" || true
+
+    # glow — terminal markdown viewer
+    spin "Installing glow $PIN_GLOW" \
+        download_github_release "charmbracelet/glow" "$PIN_GLOW" \
+        "glow_${PIN_GLOW#v}_linux_${arch_glow}.tar.gz" "glow" "/usr/local/bin" || true
+
+    # lazygit — terminal git UI
+    spin "Installing lazygit $PIN_LAZYGIT" \
+        download_github_release "jesseduffield/lazygit" "$PIN_LAZYGIT" \
+        "lazygit_${PIN_LAZYGIT#v}_Linux_${arch_lazygit}.tar.gz" "lazygit" "/usr/local/bin" || true
+
+    # lazydocker — terminal docker UI
+    spin "Installing lazydocker $PIN_LAZYDOCKER" \
+        download_github_release "jesseduffield/lazydocker" "$PIN_LAZYDOCKER" \
+        "lazydocker_${PIN_LAZYDOCKER#v}_Linux_${arch_lazydocker}.tar.gz" "lazydocker" "/usr/local/bin" || true
+
+    # fastfetch — system info (.deb)
+    spin "Installing fastfetch $PIN_FASTFETCH" \
+        download_github_release "fastfetch-cli/fastfetch" "$PIN_FASTFETCH" \
+        "fastfetch-linux-${DPKG_ARCH}.deb" "fastfetch" "/usr/local/bin" || true
+}
+
+#-------------------------------------------------------------------------------
+# INSTALL ZOXIDE — all tiers
+#-------------------------------------------------------------------------------
 install_zoxide() {
     header "INSTALLING ZOXIDE"
+
     if command -v zoxide &>/dev/null; then
-        success "zoxide already installed"
+        success "zoxide already installed ($(zoxide --version 2>/dev/null || echo 'unknown'))"
         return 0
     fi
 
@@ -779,22 +956,33 @@ install_zoxide() {
             "${APT_ENV[@]}" apt-get install -y -qq zoxide && return 0
     fi
 
-    # Fall back to GitHub binary
-    local zo_arch="$UNAME_ARCH"
-    local zo_asset="zoxide-0.9.6-${zo_arch}-unknown-linux-musl.tar.gz"
+    # Fallback: GitHub binary
+    local zoxide_arch=""
+    case "$UNAME_ARCH" in
+        aarch64)  zoxide_arch="aarch64-unknown-linux-musl" ;;
+        armv7l)   zoxide_arch="armv7-unknown-linux-musleabihf" ;;
+        armv6l)   zoxide_arch="arm-unknown-linux-musleabihf" ;;
+        *)        warn "Cannot install zoxide for $UNAME_ARCH"; return 1 ;;
+    esac
+
     spin "Installing zoxide from GitHub" \
-        download_github_release "ajeetdsouza/zoxide" "v0.9.6" "$zo_asset" "zoxide" || \
-        warn "zoxide install failed"
+        download_github_release "ajeetdsouza/zoxide" "v0.9.6" \
+        "zoxide-0.9.6-${zoxide_arch}.tar.gz" "zoxide" "/usr/local/bin" || true
 }
 
+#-------------------------------------------------------------------------------
+# INSTALL UV — all tiers (Python package manager)
+#-------------------------------------------------------------------------------
 install_uv() {
+    header "INSTALLING UV"
+
     if command -v uv &>/dev/null; then
         success "uv already installed ($(uv --version 2>/dev/null || echo 'unknown'))"
         return 0
     fi
 
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would install uv"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would install uv from astral.sh" | tee -a "$LOG_FILE"
         return 0
     fi
 
@@ -805,52 +993,70 @@ install_uv() {
         if spin "Installing uv" sh -c "$uv_script"; then
             success "uv installed"
         else
-            warn "uv install failed (non-critical)"
+            warn "uv install failed (non-critical, can install later)"
         fi
     else
-        warn "Could not download uv installer"
+        warn "Could not download uv installer (non-critical)"
     fi
 }
 
+#-------------------------------------------------------------------------------
+# INSTALL STARSHIP — full tier only
+#-------------------------------------------------------------------------------
 install_starship() {
-    [[ "$TIER" != "full" ]] && return 0
+    if [[ "$TIER" != "full" ]]; then
+        return 0
+    fi
+
     header "INSTALLING STARSHIP PROMPT"
 
     if command -v starship &>/dev/null; then
-        success "starship already installed"
+        success "starship already installed ($(starship --version 2>/dev/null | head -1 || echo 'unknown'))"
         return 0
     fi
 
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would install starship"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would install starship via official installer" | tee -a "$LOG_FILE"
         return 0
     fi
 
-    if spin "Installing starship" \
-        bash -c 'curl -sS https://starship.rs/install.sh | sh -s -- -y'; then
-        track_status "Starship" "OK"
+    local starship_script
+    starship_script=$(curl -fsSL https://starship.rs/install.sh 2>/dev/null) || true
+    if [[ -n "$starship_script" ]]; then
+        if spin "Installing starship" sh -c "$starship_script -- --yes"; then
+            success "starship installed"
+        else
+            warn "starship install failed"
+        fi
     else
-        warn "Starship install failed"
-        track_status "Starship" "FAIL"
+        warn "Could not download starship installer"
     fi
 }
 
+#-------------------------------------------------------------------------------
+# INSTALL ZELLIJ — full tier, arm64 only
+#-------------------------------------------------------------------------------
 install_zellij() {
-    [[ "$TIER" != "full" ]] && return 0
-    [[ "$DPKG_ARCH" != "arm64" ]] && { log "Skipping Zellij (arm64 only)"; return 0; }
+    if [[ "$TIER" != "full" || "$DPKG_ARCH" != "arm64" ]]; then
+        return 0
+    fi
 
     header "INSTALLING ZELLIJ"
 
     if command -v zellij &>/dev/null; then
-        success "zellij already installed"
-        return 0
+        local current_ver
+        current_ver=$(zellij --version 2>/dev/null | awk '{print $2}' || echo "")
+        if [[ "$current_ver" == "${PIN_ZELLIJ#v}" ]]; then
+            success "zellij ${PIN_ZELLIJ} already installed"
+            return 0
+        fi
     fi
 
-    local asset="zellij-aarch64-unknown-linux-musl.tar.gz"
-    spin "Installing zellij" \
-        download_github_release "zellij-org/zellij" "$PIN_ZELLIJ" "$asset" "zellij" || \
-        warn "Zellij install failed (non-critical)"
+    spin "Installing zellij $PIN_ZELLIJ" \
+        download_github_release "zellij-org/zellij" "$PIN_ZELLIJ" \
+        "zellij-aarch64-unknown-linux-musl.tar.gz" "zellij" "/usr/local/bin" || true
 }
+
 
 #-------------------------------------------------------------------------------
 # SHELL FRAMEWORK — ANTIDOTE
@@ -858,79 +1064,110 @@ install_zellij() {
 install_antidote() {
     header "INSTALLING ANTIDOTE PLUGIN MANAGER"
 
-    local antidote_dir="${ZDOTDIR:-$HOME}/.antidote"
-
-    # Detect existing oh-my-zsh
-    if [[ -d "$HOME/.oh-my-zsh" ]]; then
-        warn "oh-my-zsh detected — v20 uses Antidote instead"
-        warn "Your oh-my-zsh installation has been preserved (not deleted)"
-        warn "Custom plugins in ~/.oh-my-zsh/custom/ are still available"
-    fi
-
-    if [[ -d "$antidote_dir" ]]; then
+    if [[ -d "$HOME/.antidote" ]]; then
         success "Antidote already installed"
-        return 0
-    fi
-
-    if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would install Antidote"
-        track_status "Antidote" "OK"
-        return 0
-    fi
-
-    if spin "Cloning Antidote" \
-        git clone --depth=1 https://github.com/mattmc3/antidote.git "$antidote_dir"; then
-        track_status "Antidote" "OK"
+        # Pull latest if not dry run
+        if [[ "$DRY_RUN" != true ]]; then
+            (cd "$HOME/.antidote" && git pull --quiet 2>/dev/null) || true
+        fi
     else
-        track_status "Antidote" "FAIL"
-        return 1
+        if [[ "$DRY_RUN" == true ]]; then
+            echo -e "  ${CYAN}[DRY RUN]${NC} Would clone antidote to ~/.antidote" | tee -a "$LOG_FILE"
+        else
+            spin "Cloning antidote" \
+                git clone --depth=1 https://github.com/mattmc3/antidote.git "$HOME/.antidote" || {
+                    track_status "Antidote" "FAIL"
+                    return 1
+                }
+        fi
     fi
+
+    # Check for oh-my-zsh and warn about migration
+    if [[ -d "$HOME/.oh-my-zsh" ]]; then
+        warn "Found ~/.oh-my-zsh — you're migrating from oh-my-zsh to antidote."
+        warn "oh-my-zsh will NOT be loaded. Remove ~/.oh-my-zsh when ready."
+    fi
+
+    track_status "Antidote" "OK"
 }
 
+#-------------------------------------------------------------------------------
+# CREATE PLUGIN LIST
+#-------------------------------------------------------------------------------
 create_plugin_list() {
-    log "Creating plugin list..."
+    header "CREATING PLUGIN LIST"
+
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would create ~/.zsh_plugins.txt"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would write ~/.zsh_plugins.txt" | tee -a "$LOG_FILE"
         track_status "Plugins" "OK"
         return 0
     fi
 
-    cat > "$HOME/.zsh_plugins.txt" << 'PLUGINS'
+    cat > "$HOME/.zsh_plugins.txt" <<'PLUGINLIST'
+# Antidote plugin list — generated by pi-bootstrap v20
+# Each line is a GitHub repo or a local path.
+
+# Completions (load first)
 zsh-users/zsh-completions
+
+# Autosuggestions (inline ghost text from history)
 zsh-users/zsh-autosuggestions
+
+# Syntax highlighting (colors as you type)
 zsh-users/zsh-syntax-highlighting
+
+# "You should use" — reminds you about aliases you forgot
 MichaelAquilina/zsh-you-should-use
+
+# Abbreviations (like fish abbreviations)
 olets/zsh-abbr kind:defer
-PLUGINS
-    success "Plugin list created"
+PLUGINLIST
+
+    success "Plugin list written to ~/.zsh_plugins.txt"
     track_status "Plugins" "OK"
 }
 
 #-------------------------------------------------------------------------------
-# PROMPT CONFIGURATION
+# PROMPT — POWERLEVEL10K (light/standard tiers)
 #-------------------------------------------------------------------------------
 install_p10k() {
-    [[ "$TIER" == "full" ]] && return 0
+    if [[ "$TIER" == "full" ]]; then
+        return 0
+    fi
+
     header "INSTALLING POWERLEVEL10K"
 
     local p10k_dir="$HOME/.powerlevel10k"
 
     if [[ -d "$p10k_dir" ]]; then
-        success "Powerlevel10k already installed"
+        success "powerlevel10k already present"
+        track_status "Powerlevel10k" "SKIP"
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would clone powerlevel10k to ~/.powerlevel10k" | tee -a "$LOG_FILE"
+        track_status "Powerlevel10k" "OK"
         return 0
     fi
 
     if spin "Cloning powerlevel10k" \
         git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$p10k_dir"; then
-        track_status "Prompt" "OK"
+        track_status "Powerlevel10k" "OK"
     else
-        track_status "Prompt" "FAIL"
+        track_status "Powerlevel10k" "FAIL"
         return 1
     fi
 }
 
+#-------------------------------------------------------------------------------
+# INSTALL NERD FONTS (light/standard tiers for p10k)
+#-------------------------------------------------------------------------------
 install_fonts() {
-    [[ "$TIER" == "full" ]] && return 0
+    if [[ "$TIER" == "full" ]]; then
+        return 0
+    fi
+
     header "INSTALLING NERD FONTS"
 
     local font_dir="$HOME/.local/share/fonts"
@@ -948,30 +1185,43 @@ install_fonts() {
 
     for font in "${fonts[@]}"; do
         local decoded_font="${font//%20/ }"
-        if [[ ! -f "$font_dir/$decoded_font" ]]; then
-            if ! spin "Downloading $decoded_font" \
-                curl -fsSL -o "$font_dir/$decoded_font" "$base_url/$font"; then
-                ((font_failures++)) || true
-            fi
+        if [[ -f "$font_dir/$decoded_font" ]]; then
+            continue
+        fi
+        if [[ "$DRY_RUN" == true ]]; then
+            echo -e "  ${CYAN}[DRY RUN]${NC} Would download $decoded_font" | tee -a "$LOG_FILE"
+        elif ! spin "Downloading $decoded_font" \
+            curl -fsSL -o "$font_dir/$decoded_font" "$base_url/$font"; then
+            ((font_failures++)) || true
         fi
     done
 
-    spin "Rebuilding font cache" fc-cache -f "$font_dir" || true
+    # Rebuild font cache
+    if [[ "$DRY_RUN" != true ]]; then
+        spin "Rebuilding font cache" fc-cache -f "$font_dir" || true
+    fi
 
     if [[ $font_failures -eq 0 ]]; then
-        success "Fonts installed (set terminal font to 'MesloLGS NF')"
-        track_status "Fonts" "OK"
+        success "Fonts installed (configure your terminal to use 'MesloLGS NF')"
+        track_status "Nerd Fonts" "OK"
     else
-        track_status "Fonts" "FAIL"
+        warn "Some fonts failed to download"
+        track_status "Nerd Fonts" "FAIL"
     fi
 }
 
+#-------------------------------------------------------------------------------
+# GENERATE P10K CONFIG
+#-------------------------------------------------------------------------------
 generate_p10k_config() {
-    [[ "$TIER" == "full" ]] && return 0
+    if [[ "$TIER" == "full" ]]; then
+        return 0
+    fi
+
     header "GENERATING POWERLEVEL10K CONFIG"
 
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would generate .p10k.zsh"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would generate ~/.p10k.zsh for tier=$TIER" | tee -a "$LOG_FILE"
         track_status "P10k Config" "OK"
         return 0
     fi
@@ -982,14 +1232,18 @@ generate_p10k_config() {
         _generate_p10k_light
     fi
 
+    # Clear stale instant prompt cache
     rm -f "$HOME/.cache/p10k-instant-prompt-"*.zsh 2>/dev/null
+
     success ".p10k.zsh generated (tier: $TIER)"
     track_status "P10k Config" "OK"
 }
 
 _generate_p10k_standard() {
-    cat > "$HOME/.p10k.zsh" << 'P10K_STD'
-# Powerlevel10k config — standard tier (pi-bootstrap v20)
+    cat > "$HOME/.p10k.zsh" <<'P10K_STD'
+# Powerlevel10k config — standard tier (nerdfont, rich segments)
+# Generated by pi-bootstrap v20
+
 'builtin' 'local' '-a' 'p10k_config_opts'
 [[ ! -o 'aliases'         ]] || p10k_config_opts+=('aliases')
 [[ ! -o 'sh_glob'         ]] || p10k_config_opts+=('sh_glob')
@@ -998,37 +1252,65 @@ _generate_p10k_standard() {
 
 () {
   emulate -L zsh -o extended_glob
+
   unset -m '(POWERLEVEL9K_*|DEFAULT_USER)~POWERLEVEL9K_GITSTATUS_DIR'
 
   typeset -g POWERLEVEL9K_INSTANT_PROMPT=quiet
+
+  # Left prompt: context, directory, git, newline, prompt char
   typeset -g POWERLEVEL9K_LEFT_PROMPT_ELEMENTS=(
-    context dir vcs newline prompt_char
+    context
+    dir
+    vcs
+    newline
+    prompt_char
   )
+
+  # Right prompt: status, execution time, background jobs, time
   typeset -g POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS=(
-    status command_execution_time background_jobs time
+    status
+    command_execution_time
+    background_jobs
+    time
   )
+
+  # Style
   typeset -g POWERLEVEL9K_MODE=nerdfont-complete
+  typeset -g POWERLEVEL9K_PROMPT_ON_NEWLINE=false
+  typeset -g POWERLEVEL9K_RPROMPT_ON_NEWLINE=false
   typeset -g POWERLEVEL9K_PROMPT_ADD_NEWLINE=true
+
+  # Directory
   typeset -g POWERLEVEL9K_SHORTEN_DIR_LENGTH=3
   typeset -g POWERLEVEL9K_SHORTEN_STRATEGY=truncate_to_last
   typeset -g POWERLEVEL9K_DIR_FOREGROUND=31
   typeset -g POWERLEVEL9K_DIR_BACKGROUND=238
+
+  # Git status colors
   typeset -g POWERLEVEL9K_VCS_CLEAN_FOREGROUND=0
   typeset -g POWERLEVEL9K_VCS_CLEAN_BACKGROUND=2
   typeset -g POWERLEVEL9K_VCS_UNTRACKED_FOREGROUND=0
   typeset -g POWERLEVEL9K_VCS_UNTRACKED_BACKGROUND=3
   typeset -g POWERLEVEL9K_VCS_MODIFIED_FOREGROUND=0
   typeset -g POWERLEVEL9K_VCS_MODIFIED_BACKGROUND=3
+
+  # Prompt character
   typeset -g POWERLEVEL9K_PROMPT_CHAR_OK_{VIINS,VICMD,VIVIS,VIOWR}_FOREGROUND=2
   typeset -g POWERLEVEL9K_PROMPT_CHAR_ERROR_{VIINS,VICMD,VIVIS,VIOWR}_FOREGROUND=1
   typeset -g POWERLEVEL9K_PROMPT_CHAR_{OK,ERROR}_VIINS_CONTENT_EXPANSION='❯'
   typeset -g POWERLEVEL9K_PROMPT_CHAR_{OK,ERROR}_VICMD_CONTENT_EXPANSION='❮'
+
+  # Execution time (show if > 3s)
   typeset -g POWERLEVEL9K_COMMAND_EXECUTION_TIME_THRESHOLD=3
   typeset -g POWERLEVEL9K_COMMAND_EXECUTION_TIME_FOREGROUND=0
   typeset -g POWERLEVEL9K_COMMAND_EXECUTION_TIME_BACKGROUND=3
+
+  # Time format
   typeset -g POWERLEVEL9K_TIME_FORMAT='%D{%H:%M}'
   typeset -g POWERLEVEL9K_TIME_FOREGROUND=0
   typeset -g POWERLEVEL9K_TIME_BACKGROUND=7
+
+  # Context: show user@host on SSH or root
   typeset -g POWERLEVEL9K_CONTEXT_ROOT_FOREGROUND=1
   typeset -g POWERLEVEL9K_CONTEXT_ROOT_BACKGROUND=0
   typeset -g POWERLEVEL9K_CONTEXT_{REMOTE,REMOTE_SUDO}_FOREGROUND=3
@@ -1037,10 +1319,13 @@ _generate_p10k_standard() {
   typeset -g POWERLEVEL9K_CONTEXT_BACKGROUND=0
   typeset -g POWERLEVEL9K_CONTEXT_TEMPLATE='%n@%m'
   typeset -g POWERLEVEL9K_CONTEXT_{DEFAULT,SUDO}_{CONTENT,VISUAL_IDENTIFIER}_EXPANSION=
+
+  # Status: show exit code on failure
   typeset -g POWERLEVEL9K_STATUS_OK=false
   typeset -g POWERLEVEL9K_STATUS_ERROR=true
   typeset -g POWERLEVEL9K_STATUS_ERROR_FOREGROUND=0
   typeset -g POWERLEVEL9K_STATUS_ERROR_BACKGROUND=1
+
   typeset -g POWERLEVEL9K_TRANSIENT_PROMPT=off
 
   (( ${#p10k_config_opts} )) && setopt ${p10k_config_opts[@]}
@@ -1052,8 +1337,10 @@ P10K_STD
 }
 
 _generate_p10k_light() {
-    cat > "$HOME/.p10k.zsh" << 'P10K_LIGHT'
-# Powerlevel10k config — light tier (pi-bootstrap v20)
+    cat > "$HOME/.p10k.zsh" <<'P10K_LIGHT'
+# Powerlevel10k config — light tier (ASCII, minimal, fast)
+# Generated by pi-bootstrap v20
+
 'builtin' 'local' '-a' 'p10k_config_opts'
 [[ ! -o 'aliases'         ]] || p10k_config_opts+=('aliases')
 [[ ! -o 'sh_glob'         ]] || p10k_config_opts+=('sh_glob')
@@ -1062,20 +1349,41 @@ _generate_p10k_light() {
 
 () {
   emulate -L zsh -o extended_glob
+
   unset -m '(POWERLEVEL9K_*|DEFAULT_USER)~POWERLEVEL9K_GITSTATUS_DIR'
 
   typeset -g POWERLEVEL9K_INSTANT_PROMPT=quiet
-  typeset -g POWERLEVEL9K_LEFT_PROMPT_ELEMENTS=(dir vcs prompt_char)
-  typeset -g POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS=(status)
+
+  # Minimal left prompt
+  typeset -g POWERLEVEL9K_LEFT_PROMPT_ELEMENTS=(
+    dir
+    vcs
+    prompt_char
+  )
+
+  # Minimal right prompt
+  typeset -g POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS=(
+    status
+  )
+
+  # ASCII mode for compatibility
   typeset -g POWERLEVEL9K_MODE=ascii
+
+  # Prompt char
   typeset -g POWERLEVEL9K_PROMPT_CHAR_OK_{VIINS,VICMD,VIVIS,VIOWR}_FOREGROUND=2
   typeset -g POWERLEVEL9K_PROMPT_CHAR_ERROR_{VIINS,VICMD,VIVIS,VIOWR}_FOREGROUND=1
   typeset -g POWERLEVEL9K_PROMPT_CHAR_{OK,ERROR}_VIINS_CONTENT_EXPANSION='>'
   typeset -g POWERLEVEL9K_PROMPT_CHAR_{OK,ERROR}_VICMD_CONTENT_EXPANSION='<'
+
+  # Directory
   typeset -g POWERLEVEL9K_SHORTEN_DIR_LENGTH=2
   typeset -g POWERLEVEL9K_SHORTEN_STRATEGY=truncate_to_last
+
+  # Disable gitstatus for speed on low-end hardware
   typeset -g POWERLEVEL9K_DISABLE_GITSTATUS=true
   typeset -g POWERLEVEL9K_VCS_DISABLE_GITSTATUS_FORMATTING=true
+
+  # Status only on error
   typeset -g POWERLEVEL9K_STATUS_OK=false
   typeset -g POWERLEVEL9K_STATUS_ERROR=true
 
@@ -1087,125 +1395,119 @@ _generate_p10k_light() {
 P10K_LIGHT
 }
 
+
+#-------------------------------------------------------------------------------
+# GENERATE STARSHIP CONFIG — full tier
+#-------------------------------------------------------------------------------
 generate_starship_config() {
-    [[ "$TIER" != "full" ]] && return 0
+    if [[ "$TIER" != "full" ]]; then
+        return 0
+    fi
+
     header "GENERATING STARSHIP CONFIG"
 
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would generate starship.toml"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would write ~/.config/starship.toml" | tee -a "$LOG_FILE"
+        track_status "Starship Config" "OK"
         return 0
     fi
 
     mkdir -p "$HOME/.config"
-    cat > "$HOME/.config/starship.toml" << 'STARSHIP'
-# Starship config — Catppuccin Mocha (pi-bootstrap v20)
 
-palette = "catppuccin_mocha"
+    cat > "$HOME/.config/starship.toml" <<'STARSHIP_TOML'
+# Starship prompt config — Catppuccin Mocha theme
+# Generated by pi-bootstrap v20
+
+# Catppuccin Mocha palette reference:
+# rosewater=#f5e0dc flamingo=#f2cdcd pink=#f5c2e7 mauve=#cba6f7
+# red=#f38ba8 maroon=#eba0ac peach=#fab387 yellow=#f9e2af
+# green=#a6e3a1 teal=#94e2d5 sky=#89dceb sapphire=#74c7ec
+# blue=#89b4fa lavender=#b4befe text=#cdd6f4 subtext1=#bac2de
+# subtext0=#a6adc8 overlay2=#9399b2 overlay1=#7f849c overlay0=#6c7086
+# surface2=#585b70 surface1=#45475a surface0=#313244
+# base=#1e1e2e mantle=#181825 crust=#11111b
 
 format = """
-[](surface0)\
-$os\
 $username\
 $hostname\
-[](bg:surface1 fg:surface0)\
 $directory\
-[](fg:surface1 bg:surface2)\
 $git_branch\
 $git_status\
-[](fg:surface2 bg:overlay0)\
 $cmd_duration\
-[](fg:overlay0)\
-$fill\
-$time\
 $line_break\
 $character"""
 
-[os]
-disabled = true
+right_format = """$time"""
+
+[character]
+success_symbol = "[>](bold #a6e3a1)"
+error_symbol = "[>](bold #f38ba8)"
+vimcmd_symbol = "[<](bold #cba6f7)"
 
 [username]
+style_user = "bold #89b4fa"
+style_root = "bold #f38ba8"
+format = "[$user]($style) "
 show_always = false
-style_user = "bg:surface0 fg:text"
-style_root = "bg:surface0 fg:red bold"
-format = '[$user]($style)'
 
 [hostname]
 ssh_only = true
-style = "bg:surface0 fg:subtext1"
-format = '[@$hostname]($style)'
+style = "bold #94e2d5"
+format = "[@$hostname]($style) "
 
 [directory]
-style = "bg:surface1 fg:text"
-format = "[ $path ]($style)"
+style = "bold #89b4fa"
 truncation_length = 3
 truncation_symbol = ".../"
+read_only = " ro"
+read_only_style = "#f38ba8"
 
 [git_branch]
-symbol = ""
-style = "bg:surface2 fg:text"
-format = '[ $symbol $branch ]($style)'
+style = "bold #a6e3a1"
+format = "[$symbol$branch]($style) "
+symbol = " "
 
 [git_status]
-style = "bg:surface2 fg:text"
-format = '[$all_status$ahead_behind ]($style)'
+style = "#fab387"
+format = '([\[$all_status$ahead_behind\]]($style) )'
+conflicted = "="
+ahead = "^"
+behind = "v"
+diverged = "^v"
+untracked = "?"
+stashed = "$"
+modified = "!"
+staged = "+"
+renamed = "r"
+deleted = "x"
 
 [cmd_duration]
 min_time = 3_000
-style = "bg:overlay0 fg:text"
-format = "[ $duration ]($style)"
-
-[character]
-success_symbol = "[>](bold green)"
-error_symbol = "[>](bold red)"
+style = "bold #f9e2af"
+format = "[$duration]($style) "
+show_milliseconds = false
 
 [time]
 disabled = false
+style = "#6c7086"
+format = "[$time]($style)"
 time_format = "%H:%M"
-style = "fg:subtext0"
-format = '[$time]($style)'
 
-[fill]
-symbol = ' '
+[line_break]
+disabled = false
+STARSHIP_TOML
 
-[palettes.catppuccin_mocha]
-rosewater = "#f5e0dc"
-flamingo = "#f2cdcd"
-pink = "#f5c2e7"
-mauve = "#cba6f7"
-red = "#f38ba8"
-maroon = "#eba0ac"
-peach = "#fab387"
-yellow = "#f9e2af"
-green = "#a6e3a1"
-teal = "#94e2d5"
-sky = "#89dceb"
-sapphire = "#74c7ec"
-blue = "#89b4fa"
-lavender = "#b4befe"
-text = "#cdd6f4"
-subtext1 = "#bac2de"
-subtext0 = "#a6adc8"
-overlay2 = "#9399b2"
-overlay1 = "#7f849c"
-overlay0 = "#6c7086"
-surface2 = "#585b70"
-surface1 = "#45475a"
-surface0 = "#313244"
-base = "#1e1e2e"
-mantle = "#181825"
-crust = "#11111b"
-STARSHIP
-
-    success "starship.toml generated with Catppuccin Mocha"
-    track_status "Prompt" "OK"
+    success "Starship config written to ~/.config/starship.toml"
+    track_status "Starship Config" "OK"
 }
 
 #-------------------------------------------------------------------------------
-# CATPPUCCIN MOCHA THEME
+# CATPPUCCIN THEME CONFIGS
 #-------------------------------------------------------------------------------
 configure_catppuccin() {
-    header "APPLYING CATPPUCCIN MOCHA THEME"
+    header "CONFIGURING CATPPUCCIN MOCHA THEME"
 
+    configure_fzf_theme
     configure_bat_theme
     configure_btop_theme
     configure_delta_theme
@@ -1214,85 +1516,96 @@ configure_catppuccin() {
     track_status "Catppuccin Theme" "OK"
 }
 
-configure_bat_theme() {
-    command -v bat &>/dev/null || command -v batcat &>/dev/null || return 0
+configure_fzf_theme() {
+    # FZF colors are set in .zshrc via FZF_DEFAULT_OPTS
+    # This function is a no-op — the colors are baked into generate_zshrc()
+    success "fzf Catppuccin colors: configured (via .zshrc)"
+}
 
-    local theme_dir="$HOME/.config/bat/themes"
-    local theme_file="$theme_dir/Catppuccin Mocha.tmTheme"
+configure_bat_theme() {
+    if ! command -v bat &>/dev/null && ! command -v batcat &>/dev/null; then
+        warn "bat/batcat not found, skipping bat theme"
+        return 0
+    fi
+
+    local bat_theme_dir="$HOME/.config/bat/themes"
+    local theme_file="$bat_theme_dir/Catppuccin Mocha.tmTheme"
 
     if [[ -f "$theme_file" ]]; then
-        success "bat Catppuccin theme already present"
+        success "bat Catppuccin theme already installed"
         return 0
     fi
 
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would install bat Catppuccin theme"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would download Catppuccin bat theme" | tee -a "$LOG_FILE"
         return 0
     fi
 
-    mkdir -p "$theme_dir"
-    if curl -fsSL -o "$theme_file" \
-        "https://raw.githubusercontent.com/catppuccin/bat/main/themes/Catppuccin%20Mocha.tmTheme" 2>/dev/null; then
-        # Rebuild bat cache
-        if command -v bat &>/dev/null; then
-            bat cache --build &>/dev/null || true
-        elif command -v batcat &>/dev/null; then
-            batcat cache --build &>/dev/null || true
-        fi
-        success "bat Catppuccin theme installed"
-    else
-        warn "Could not download bat theme"
-    fi
+    mkdir -p "$bat_theme_dir"
 
-    # Set bat config
-    mkdir -p "$HOME/.config/bat"
-    cat > "$HOME/.config/bat/config" << 'BATCFG'
---theme="Catppuccin Mocha"
---style="numbers,changes,header"
-BATCFG
+    local url="https://raw.githubusercontent.com/catppuccin/bat/main/themes/Catppuccin%20Mocha.tmTheme"
+    if curl -fsSL -o "$theme_file" "$url" 2>>"$LOG_FILE"; then
+        # Build bat cache
+        if command -v bat &>/dev/null; then
+            bat cache --build >> "$LOG_FILE" 2>&1 || true
+        elif command -v batcat &>/dev/null; then
+            batcat cache --build >> "$LOG_FILE" 2>&1 || true
+        fi
+        success "bat Catppuccin Mocha theme installed"
+    else
+        warn "Failed to download bat theme"
+    fi
 }
 
 configure_btop_theme() {
-    command -v btop &>/dev/null || return 0
+    if ! command -v btop &>/dev/null; then
+        return 0
+    fi
 
-    local theme_dir="$HOME/.config/btop/themes"
-    local theme_file="$theme_dir/catppuccin_mocha.theme"
+    local btop_theme_dir="$HOME/.config/btop/themes"
+    local theme_file="$btop_theme_dir/catppuccin_mocha.theme"
 
     if [[ -f "$theme_file" ]]; then
-        success "btop Catppuccin theme already present"
+        success "btop Catppuccin theme already installed"
         return 0
     fi
 
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would install btop Catppuccin theme"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would download Catppuccin btop theme" | tee -a "$LOG_FILE"
         return 0
     fi
 
-    mkdir -p "$theme_dir"
-    if curl -fsSL -o "$theme_file" \
-        "https://raw.githubusercontent.com/catppuccin/btop/main/themes/catppuccin_mocha.theme" 2>/dev/null; then
-        success "btop Catppuccin theme installed"
+    mkdir -p "$btop_theme_dir"
+
+    local url="https://raw.githubusercontent.com/catppuccin/btop/main/themes/catppuccin_mocha.theme"
+    if curl -fsSL -o "$theme_file" "$url" 2>>"$LOG_FILE"; then
+        success "btop Catppuccin Mocha theme installed"
     else
-        warn "Could not download btop theme"
+        warn "Failed to download btop theme"
     fi
 }
 
 configure_delta_theme() {
-    command -v delta &>/dev/null || return 0
+    if ! command -v delta &>/dev/null; then
+        return 0
+    fi
+
+    local gitconfig="$HOME/.gitconfig"
+
+    # Check if delta section already exists
+    if [[ -f "$gitconfig" ]] && grep -q '\[delta\]' "$gitconfig" 2>/dev/null; then
+        success "delta config already present in .gitconfig"
+        return 0
+    fi
 
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would configure delta in gitconfig"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would add delta config to .gitconfig" | tee -a "$LOG_FILE"
         return 0
     fi
 
-    # Only add if not already configured
-    if grep -q '\[delta\]' "$HOME/.gitconfig" 2>/dev/null; then
-        success "delta already configured in .gitconfig"
-        return 0
-    fi
+    cat >> "$gitconfig" <<'DELTACONF'
 
-    cat >> "$HOME/.gitconfig" << 'DELTACONF'
-
+# Delta pager config — Catppuccin Mocha (added by pi-bootstrap v20)
 [core]
     pager = delta
 
@@ -1301,13 +1614,20 @@ configure_delta_theme() {
 
 [delta]
     navigate = true
-    dark = true
-    syntax-theme = "Catppuccin Mocha"
-    minus-style = "syntax #3B1219"
-    minus-emph-style = "syntax #5B2131"
-    plus-style = "syntax #1B3224"
-    plus-emph-style = "syntax #2B5738"
+    side-by-side = false
     line-numbers = true
+    syntax-theme = "Catppuccin Mocha"
+    minus-style = "syntax #3b2030"
+    minus-emph-style = "syntax #53273a"
+    plus-style = "syntax #203b20"
+    plus-emph-style = "syntax #274027"
+    hunk-header-style = "syntax bold"
+    hunk-header-decoration-style = "#585b70 ul"
+    file-style = "#cba6f7 bold"
+    file-decoration-style = "#585b70 ul"
+    line-numbers-minus-style = "#f38ba8"
+    line-numbers-plus-style = "#a6e3a1"
+    line-numbers-zero-style = "#6c7086"
 
 [merge]
     conflictstyle = diff3
@@ -1315,23 +1635,33 @@ configure_delta_theme() {
 [diff]
     colorMoved = default
 DELTACONF
-    success "delta configured with Catppuccin"
+
+    success "delta Catppuccin config added to .gitconfig"
 }
 
 configure_zellij_theme() {
-    [[ "$TIER" != "full" ]] && return 0
-    command -v zellij &>/dev/null || return 0
-
-    if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would configure Zellij theme"
+    if [[ "$TIER" != "full" ]] || ! command -v zellij &>/dev/null; then
         return 0
     fi
 
-    mkdir -p "$HOME/.config/zellij"
-    cat > "$HOME/.config/zellij/config.kdl" << 'ZELLIJCONF'
-// Zellij config — Catppuccin Mocha (pi-bootstrap v20)
-theme "catppuccin-mocha"
+    local zellij_theme_dir="$HOME/.config/zellij/themes"
+    local theme_file="$zellij_theme_dir/catppuccin-mocha.kdl"
 
+    if [[ -f "$theme_file" ]]; then
+        success "zellij Catppuccin theme already installed"
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would write zellij Catppuccin theme" | tee -a "$LOG_FILE"
+        return 0
+    fi
+
+    mkdir -p "$zellij_theme_dir"
+
+    cat > "$theme_file" <<'ZELLIJ_THEME'
+// Catppuccin Mocha theme for Zellij
+// Generated by pi-bootstrap v20
 themes {
     catppuccin-mocha {
         bg "#585b70"
@@ -1342,14 +1672,16 @@ themes {
         yellow "#f9e2af"
         magenta "#f5c2e7"
         orange "#fab387"
-        cyan "#94e2d5"
+        cyan "#89dceb"
         black "#1e1e2e"
         white "#cdd6f4"
     }
 }
-ZELLIJCONF
-    success "Zellij configured with Catppuccin"
+ZELLIJ_THEME
+
+    success "zellij Catppuccin Mocha theme written"
 }
+
 
 #-------------------------------------------------------------------------------
 # TMUX CONFIGURATION
@@ -1358,44 +1690,44 @@ configure_tmux() {
     header "CONFIGURING TMUX"
 
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would configure tmux"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would install TPM and generate ~/.tmux.conf" | tee -a "$LOG_FILE"
         track_status "tmux Config" "OK"
         return 0
     fi
 
-    # Install TPM
+    # Install TPM (Tmux Plugin Manager)
     local tpm_dir="$HOME/.tmux/plugins/tpm"
     if [[ ! -d "$tpm_dir" ]]; then
-        if spin "Installing TPM (tmux plugin manager)" \
-            git clone --depth=1 https://github.com/tmux-plugins/tpm "$tpm_dir"; then
-            success "TPM installed"
-        else
-            warn "TPM install failed"
-        fi
+        spin "Cloning TPM (Tmux Plugin Manager)" \
+            git clone --depth=1 https://github.com/tmux-plugins/tpm "$tpm_dir" || {
+                warn "Failed to clone TPM"
+            }
     else
         success "TPM already installed"
     fi
 
     # Generate tmux.conf
-    cat > "$HOME/.tmux.conf" << 'TMUXCONF'
-# tmux.conf — Catppuccin Mocha (pi-bootstrap v20)
+    cat > "$HOME/.tmux.conf" <<'TMUX_CONF'
+# tmux.conf — Generated by pi-bootstrap v20
+# Catppuccin Mocha theme, ADHD-friendly defaults
 
-# True color support
+# ─── Terminal ────────────────────────────────────────────────────────
 set -g default-terminal "tmux-256color"
 set -ga terminal-overrides ",*256col*:Tc"
 
-# Mouse support
+# ─── General ─────────────────────────────────────────────────────────
 set -g mouse on
-
-# Scrollback
 set -g history-limit 10000
-
-# Start numbering at 1 (not 0)
 set -g base-index 1
 setw -g pane-base-index 1
+
+# Renumber windows when one is closed
 set -g renumber-windows on
 
-# Intuitive splits
+# Reduce escape delay (helps with vim)
+set -sg escape-time 10
+
+# ─── Intuitive splits ────────────────────────────────────────────────
 bind | split-window -h -c "#{pane_current_path}"
 bind - split-window -v -c "#{pane_current_path}"
 unbind '"'
@@ -1404,40 +1736,34 @@ unbind %
 # New window in current path
 bind c new-window -c "#{pane_current_path}"
 
-# Faster escape time
-set -sg escape-time 10
+# ─── Pane navigation (vim-style) ─────────────────────────────────────
+bind h select-pane -L
+bind j select-pane -D
+bind k select-pane -U
+bind l select-pane -R
 
-# Focus events (for vim/neovim)
-set -g focus-events on
+# ─── Reload config ───────────────────────────────────────────────────
+bind r source-file ~/.tmux.conf \; display-message "Config reloaded"
 
-# Reload config
-bind r source-file ~/.tmux.conf \; display "Config reloaded"
-
-# TPM plugins
+# ─── TPM Plugins ─────────────────────────────────────────────────────
 set -g @plugin 'tmux-plugins/tpm'
 set -g @plugin 'tmux-plugins/tmux-sensible'
 set -g @plugin 'catppuccin/tmux'
 
-# Catppuccin config
+# ─── Catppuccin config ───────────────────────────────────────────────
 set -g @catppuccin_flavor 'mocha'
 set -g @catppuccin_window_status_style "rounded"
-set -g @catppuccin_window_default_text " #W"
-set -g @catppuccin_window_current_text " #W"
+set -g @catppuccin_status_modules_right "application session date_time"
+set -g @catppuccin_date_time_text "%H:%M"
 
-set -g status-right-length 100
-set -g status-left-length 100
-set -g status-left ""
-set -g status-right "#{E:@catppuccin_status_application}"
-set -agF status-right "#{E:@catppuccin_status_session}"
-set -agF status-right "#{E:@catppuccin_status_date_time}"
-
-# Initialize TPM (keep at bottom)
+# ─── Initialize TPM (keep at very bottom) ────────────────────────────
 run '~/.tmux/plugins/tpm/tpm'
-TMUXCONF
+TMUX_CONF
 
-    success "tmux.conf generated with Catppuccin"
+    success "tmux.conf generated with Catppuccin Mocha"
     track_status "tmux Config" "OK"
 }
+
 
 #-------------------------------------------------------------------------------
 # MODULAR ALIASES
@@ -1445,18 +1771,19 @@ TMUXCONF
 create_modular_aliases() {
     header "CREATING MODULAR ALIASES"
 
+    local alias_dir="$HOME/.config/zsh/aliases"
+
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would create modular aliases"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would create alias files in $alias_dir" | tee -a "$LOG_FILE"
         track_status "Modular Aliases" "OK"
         return 0
     fi
 
-    local alias_dir="$HOME/.config/zsh/aliases"
     mkdir -p "$alias_dir"
 
     # --- docker.zsh ---
-    cat > "$alias_dir/docker.zsh" << 'DOCKER_ALIASES'
-# Docker aliases (pi-bootstrap v20)
+    cat > "$alias_dir/docker.zsh" <<'DOCKER_ALIASES'
+# Docker aliases — pi-bootstrap v20
 alias dps='docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
 alias dcu='docker compose up -d'
 alias dcd='docker compose down'
@@ -1465,8 +1792,8 @@ alias dprune='docker system prune -af'
 DOCKER_ALIASES
 
     # --- git.zsh ---
-    cat > "$alias_dir/git.zsh" << 'GIT_ALIASES'
-# Git aliases (pi-bootstrap v20)
+    cat > "$alias_dir/git.zsh" <<'GIT_ALIASES'
+# Git aliases — pi-bootstrap v20
 alias gs='git status'
 alias gd='git diff'
 alias gl='git log --oneline -20'
@@ -1479,26 +1806,27 @@ alias gb='git branch'
 GIT_ALIASES
 
     # --- navigation.zsh ---
-    cat > "$alias_dir/navigation.zsh" << 'NAV_ALIASES'
-# Navigation aliases (pi-bootstrap v20)
+    cat > "$alias_dir/navigation.zsh" <<'NAV_ALIASES'
+# Navigation aliases — pi-bootstrap v20
 alias ..='cd ..'
 alias ...='cd ../..'
 alias ....='cd ../../..'
 
+# mkdir + cd in one shot
 mkcd() { mkdir -p "$1" && cd "$1"; }
 NAV_ALIASES
 
     # --- pi.zsh ---
-    cat > "$alias_dir/pi.zsh" << 'PI_ALIASES'
-# Raspberry Pi aliases (pi-bootstrap v20)
+    cat > "$alias_dir/pi.zsh" <<'PI_ALIASES'
+# Raspberry Pi aliases — pi-bootstrap v20
 alias temp='vcgencmd measure_temp 2>/dev/null || echo "N/A"'
 alias throttle='vcgencmd get_throttled 2>/dev/null || echo "vcgencmd not available"'
 alias pimodel='cat /proc/device-tree/model 2>/dev/null && echo'
 PI_ALIASES
 
     # --- system.zsh ---
-    cat > "$alias_dir/system.zsh" << 'SYS_ALIASES'
-# System aliases (pi-bootstrap v20)
+    cat > "$alias_dir/system.zsh" <<'SYSTEM_ALIASES'
+# System aliases — pi-bootstrap v20
 alias update='sudo apt update && sudo apt upgrade -y'
 alias ports='sudo ss -tulnp'
 alias myip='curl -s ifconfig.me && echo'
@@ -1506,24 +1834,19 @@ alias cls='clear'
 alias c='clear'
 alias df='df -h'
 alias du='du -h'
+alias ll='ls -lah --color=auto'
+alias la='ls -A --color=auto'
 alias grep='grep --color=auto'
-
-# Safety aliases
 alias rm='rm -i'
 alias cp='cp -i'
 alias mv='mv -i'
+SYSTEM_ALIASES
 
-# Listing
-alias ll='ls -lah --color=auto'
-alias la='ls -A --color=auto'
-alias l='ls -CF --color=auto'
-SYS_ALIASES
-
-    # Add eza aliases if eza is available (full tier)
+    # Add eza aliases if eza is installed
     if command -v eza &>/dev/null; then
-        cat >> "$alias_dir/system.zsh" << 'EZA_ALIASES'
+        cat >> "$alias_dir/system.zsh" <<'EZA_ALIASES'
 
-# eza (modern ls replacement)
+# eza overrides (modern ls)
 alias ls='eza --icons --group-directories-first'
 alias ll='eza -la --icons --group-directories-first'
 alias tree='eza --tree --icons'
@@ -1531,10 +1854,11 @@ EZA_ALIASES
     fi
 
     # --- adhd.zsh ---
-    cat > "$alias_dir/adhd.zsh" << 'ADHD_ALIASES'
-# ADHD tools (pi-bootstrap v20)
+    cat > "$alias_dir/adhd.zsh" <<'ADHD_ALIASES'
+# ADHD toolkit aliases — pi-bootstrap v20
+# Designed to fight context loss, time blindness, and forgotten aliases.
 
-# Fuzzy-search all aliases
+# Quick alias fuzzy finder
 halp() { alias | fzf; }
 
 # Context recovery — "what was I doing?"
@@ -1614,66 +1938,83 @@ today() {
     echo ""
 }
 
-# ntfy.sh notification
+# ntfy.sh notification helper
 notify-done() {
-    local msg="${1:-Task complete on $(hostname)}"
-    local topic
-    if [[ -f ~/.config/adhd-kit/ntfy-topic ]]; then
-        topic=$(<~/.config/adhd-kit/ntfy-topic)
-        topic=$(echo "$topic" | tr -d '[:space:]')
+    local msg="${1:-Task complete}"
+    local topic_file="$HOME/.config/adhd-kit/ntfy-topic"
+    local topic=""
+
+    if [[ -f "$topic_file" ]]; then
+        topic=$(<"$topic_file")
     fi
-    if [[ -n "${topic:-}" ]]; then
-        curl -s -d "$msg" "https://ntfy.sh/${topic}"
-        echo "Notification sent to ntfy.sh/${topic}"
+
+    if [[ -n "$topic" ]]; then
+        curl -s -d "$msg" "https://ntfy.sh/$topic"
+        echo "Notification sent to ntfy.sh/$topic"
     else
-        echo "Set your ntfy topic: mkdir -p ~/.config/adhd-kit && echo 'your-topic' > ~/.config/adhd-kit/ntfy-topic"
+        echo "Set your ntfy.sh topic: echo 'your-topic' > ~/.config/adhd-kit/ntfy-topic"
     fi
 }
 ADHD_ALIASES
 
-    success "Modular aliases created ($(ls -1 "$alias_dir" | wc -l) files)"
+    # Create ntfy config dir
+    mkdir -p "$HOME/.config/adhd-kit"
+
+    success "Modular aliases created in $alias_dir"
     track_status "Modular Aliases" "OK"
 }
 
+
 #-------------------------------------------------------------------------------
-# GENERATE .ZSHRC
+# GENERATE .ZSHRC — THE MOST IMPORTANT FUNCTION
+# This generates the shell config that the user will live in daily.
+# Tier-conditional: full tier gets Starship, light/standard get P10k.
 #-------------------------------------------------------------------------------
 generate_zshrc() {
     header "GENERATING .zshrc"
 
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would generate .zshrc"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would generate ~/.zshrc for tier=$TIER" | tee -a "$LOG_FILE"
         track_status "Generate .zshrc" "OK"
         return 0
     fi
 
-    # Write the common header
-    cat > "$HOME/.zshrc" << 'ZSHRC_HEAD'
+    # Start building the .zshrc
+    # We need some parts to expand NOW (like $TIER checks) and most parts
+    # to remain literal zsh code. Strategy: write sections with mixed heredocs.
+
+    # --- Header ---
+    cat > "$HOME/.zshrc" <<'ZSHRC_STATIC_TOP'
 #===============================================================================
 # .zshrc — Generated by pi-bootstrap v20
 # ADHD-Friendly Configuration with Antidote + Catppuccin Mocha
+#
+# Structure:
+#   1. MOTD (before instant prompt)
+#   2. Prompt init (p10k instant prompt or starship)
+#   3. Antidote plugins
+#   4. History, options, completions, keybindings
+#   5. Tool integrations (fzf, zoxide)
+#   6. Modular aliases (sourced from ~/.config/zsh/aliases/)
+#   7. ADHD helpers (notifications, auto-ls, terminal title)
 #===============================================================================
 
 #-------------------------------------------------------------------------------
-# MOTD (must run BEFORE instant prompt to avoid p10k warning)
+# MOTD (must run BEFORE instant prompt to avoid p10k console output warning)
 #-------------------------------------------------------------------------------
 if [[ -o login && -f /etc/profile.d/99-earthlume-motd.sh ]]; then
     bash /etc/profile.d/99-earthlume-motd.sh
 fi
 
-ZSHRC_HEAD
+ZSHRC_STATIC_TOP
 
-    # Tier-specific prompt init
-    if [[ "$TIER" == "full" ]]; then
-        # Starship — no instant prompt needed
-        cat >> "$HOME/.zshrc" << 'ZSHRC_STARSHIP_NOTE'
-# Prompt: Starship (full tier — configured in ~/.config/starship.toml)
-ZSHRC_STARSHIP_NOTE
-    else
-        # P10k instant prompt
-        cat >> "$HOME/.zshrc" << 'ZSHRC_P10K_INSTANT'
+    # --- Tier-conditional: P10k instant prompt OR nothing (starship doesn't need it) ---
+    if [[ "$TIER" != "full" ]]; then
+        cat >> "$HOME/.zshrc" <<'ZSHRC_P10K_INSTANT'
 #-------------------------------------------------------------------------------
-# POWERLEVEL10K INSTANT PROMPT (must be near top of .zshrc)
+# POWERLEVEL10K INSTANT PROMPT
+# Must be near the top. Initialization code that may require console input
+# (password prompts, [y/n] confirmations, etc.) must go above this block.
 #-------------------------------------------------------------------------------
 if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
   source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
@@ -1682,8 +2023,8 @@ fi
 ZSHRC_P10K_INSTANT
     fi
 
-    # Common body
-    cat >> "$HOME/.zshrc" << 'ZSHRC_BODY'
+    # --- Common sections ---
+    cat >> "$HOME/.zshrc" <<'ZSHRC_COMMON'
 #-------------------------------------------------------------------------------
 # PATH
 #-------------------------------------------------------------------------------
@@ -1696,7 +2037,7 @@ source "${ZDOTDIR:-$HOME}/.antidote/antidote.zsh"
 antidote load
 
 #-------------------------------------------------------------------------------
-# HISTORY — searchable, deduplicated, shared across sessions
+# HISTORY
 #-------------------------------------------------------------------------------
 HISTFILE=~/.zsh_history
 HISTSIZE=50000
@@ -1707,31 +2048,33 @@ setopt SHARE_HISTORY           # Share history across terminals
 setopt INC_APPEND_HISTORY      # Write immediately, not on exit
 
 #-------------------------------------------------------------------------------
-# SHELL OPTIONS — reduce friction
+# SHELL OPTIONS
 #-------------------------------------------------------------------------------
 setopt CORRECT                 # Correct commands
 setopt CORRECT_ALL             # Correct arguments too
-SPROMPT="Correct %R to %r? [nyae] "
 setopt AUTO_CD                 # cd by just typing directory name
 setopt AUTO_PUSHD              # Push dirs onto stack automatically
 setopt PUSHD_IGNORE_DUPS       # No duplicate dirs in stack
 setopt PUSHD_SILENT            # Don't print stack after pushd/popd
 setopt COMPLETE_IN_WORD        # Complete from cursor position
 setopt ALWAYS_TO_END           # Move cursor to end after completion
+SPROMPT="Correct %R to %r? [nyae] "
 
 #-------------------------------------------------------------------------------
-# COMPLETION — cached daily rebuild
+# COMPLETION (cached, daily rebuild)
 #-------------------------------------------------------------------------------
 autoload -Uz compinit
 if [[ -n ${ZDOTDIR:-$HOME}/.zcompdump(#qN.mh+24) ]]; then
-    compinit
+  compinit
 else
-    compinit -C
+  compinit -C
 fi
 zstyle ':completion:*' menu select
 
 #-------------------------------------------------------------------------------
-# KEY BINDINGS — arrow key partial history search
+# KEY BINDINGS
+# Up/Down arrow partial history search:
+# Type "git" then press Up to find previous git commands
 #-------------------------------------------------------------------------------
 autoload -U up-line-or-beginning-search down-line-or-beginning-search
 zle -N up-line-or-beginning-search
@@ -1753,13 +2096,15 @@ ZSH_AUTOSUGGEST_USE_ASYNC=1
 [[ -f /usr/share/doc/fzf/examples/key-bindings.zsh ]] && source /usr/share/doc/fzf/examples/key-bindings.zsh
 [[ -f /usr/share/doc/fzf/examples/completion.zsh ]] && source /usr/share/doc/fzf/examples/completion.zsh
 
-# Catppuccin Mocha palette for fzf
+#-------------------------------------------------------------------------------
+# CATPPUCCIN FZF COLORS
+#-------------------------------------------------------------------------------
 export FZF_DEFAULT_OPTS=" \
   --color=bg+:#313244,bg:#1e1e2e,spinner:#f5e0dc,hl:#f38ba8 \
   --color=fg:#cdd6f4,header:#f38ba8,info:#cba6f7,pointer:#f5e0dc \
   --color=marker:#b4befe,fg+:#cdd6f4,prompt:#cba6f7,hl+:#f38ba8 \
   --color=selected-bg:#45475a \
-  --border=\"rounded\" --preview-window=\"border-rounded\" \
+  --border=\"rounded\" --border-label=\"\" --preview-window=\"border-rounded\" \
   --prompt=\"> \" --marker=\">\" --pointer=\">\" --separator=\"-\" \
   --scrollbar=\"|\" --info=\"right\""
 
@@ -1769,7 +2114,7 @@ export FZF_DEFAULT_OPTS=" \
 command -v zoxide &>/dev/null && eval "$(zoxide init zsh)"
 
 #-------------------------------------------------------------------------------
-# AUTO-LS AFTER CD (immediate spatial awareness)
+# AUTO-LS AFTER CD
 #-------------------------------------------------------------------------------
 autoload -Uz add-zsh-hook
 __auto_ls() { ls --color=auto; }
@@ -1778,44 +2123,36 @@ add-zsh-hook chpwd __auto_ls
 #-------------------------------------------------------------------------------
 # COLORED MAN PAGES (easier to scan)
 #-------------------------------------------------------------------------------
-export LESS_TERMCAP_mb=$'\e[1;31m'
-export LESS_TERMCAP_md=$'\e[1;36m'
-export LESS_TERMCAP_me=$'\e[0m'
-export LESS_TERMCAP_so=$'\e[1;33;44m'
-export LESS_TERMCAP_se=$'\e[0m'
-export LESS_TERMCAP_us=$'\e[1;32m'
-export LESS_TERMCAP_ue=$'\e[0m'
+export LESS_TERMCAP_mb=$'\e[1;31m'    # begin bold (red)
+export LESS_TERMCAP_md=$'\e[1;36m'    # begin bold mode (cyan — headings)
+export LESS_TERMCAP_me=$'\e[0m'       # end bold mode
+export LESS_TERMCAP_so=$'\e[1;33;44m' # begin standout (yellow on blue — search hits)
+export LESS_TERMCAP_se=$'\e[0m'       # end standout
+export LESS_TERMCAP_us=$'\e[1;32m'    # begin underline (green — flags/args)
+export LESS_TERMCAP_ue=$'\e[0m'       # end underline
 
 #-------------------------------------------------------------------------------
 # TERMINAL TITLE + LONG COMMAND NOTIFICATION
+# Title: shows user@host:dir — helps identify tabs/windows
+# Bell: rings after commands >30s — catches your attention on task switch
+# ntfy: sends push notification for commands >60s (if configured)
 #-------------------------------------------------------------------------------
 TBEEP=30
-_CMD_START=0
-_CMD_NAME=""
-
 preexec() {
     _CMD_START=$EPOCHSECONDS
     _CMD_NAME="$1"
 }
-
 precmd() {
-    # Set terminal title
     print -Pn "\e]2;%n@%m: %~\a"
-
-    # Bell after long commands (catches attention on task switch)
     if (( _CMD_START && EPOCHSECONDS - _CMD_START >= TBEEP )); then
         print "\a"
     fi
-
-    # ntfy.sh push notification for very long commands (>60s)
-    local _ntfy_topic=""
+    # ntfy notification for very long commands (>60s)
+    local _ntfy_topic
     [[ -f ~/.config/adhd-kit/ntfy-topic ]] && _ntfy_topic=$(<~/.config/adhd-kit/ntfy-topic)
-    _ntfy_topic=$(echo "${_ntfy_topic:-}" | tr -d '[:space:]')
-    if [[ -n "$_ntfy_topic" ]] && (( _CMD_START && EPOCHSECONDS - _CMD_START >= 60 )); then
-        curl -s -d "Done ($(( EPOCHSECONDS - _CMD_START ))s): ${_CMD_NAME}" \
-            "https://ntfy.sh/${_ntfy_topic}" &>/dev/null &
+    if [[ -n "${_ntfy_topic:-}" ]] && (( _CMD_START && EPOCHSECONDS - _CMD_START >= 60 )); then
+        curl -s -d "Done ($(( EPOCHSECONDS - _CMD_START ))s): ${_CMD_NAME}" "https://ntfy.sh/${_ntfy_topic}" &>/dev/null &
     fi
-
     _CMD_START=0
 }
 
@@ -1829,29 +2166,30 @@ precmd() {
 #-------------------------------------------------------------------------------
 for f in ~/.config/zsh/aliases/*.zsh(N); do source "$f"; done
 
-ZSHRC_BODY
+ZSHRC_COMMON
 
-    # Tier-specific prompt init at the end
+    # --- Tier-conditional: Starship init OR P10k init ---
     if [[ "$TIER" == "full" ]]; then
-        cat >> "$HOME/.zshrc" << 'ZSHRC_STARSHIP'
+        cat >> "$HOME/.zshrc" <<'ZSHRC_STARSHIP'
 #-------------------------------------------------------------------------------
-# STARSHIP PROMPT
+# STARSHIP PROMPT (full tier)
 #-------------------------------------------------------------------------------
 eval "$(starship init zsh)"
 ZSHRC_STARSHIP
     else
-        cat >> "$HOME/.zshrc" << 'ZSHRC_P10K'
+        cat >> "$HOME/.zshrc" <<'ZSHRC_P10K'
 #-------------------------------------------------------------------------------
-# POWERLEVEL10K
+# POWERLEVEL10K PROMPT (light/standard tier)
 #-------------------------------------------------------------------------------
 source ~/.powerlevel10k/powerlevel10k.zsh-theme
 [[ -f ~/.p10k.zsh ]] && source ~/.p10k.zsh
 ZSHRC_P10K
     fi
 
-    success ".zshrc generated (tier: $TIER)"
+    success ".zshrc generated for tier: $TIER"
     track_status "Generate .zshrc" "OK"
 }
+
 
 #-------------------------------------------------------------------------------
 # INSTALL CUSTOM MOTD
@@ -1866,7 +2204,7 @@ install_motd() {
     fi
 
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would install MOTD"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would install MOTD to /etc/profile.d/" | tee -a "$LOG_FILE"
         track_status "Custom MOTD" "OK"
         return 0
     fi
@@ -1877,34 +2215,34 @@ install_motd() {
 #!/bin/bash
 #===============================================================================
 # Earthlume's Fun Homelab — Dynamic MOTD
-# Version: 20
+# Version: 20 — "I cast Detect Magic on the terminal"
 #===============================================================================
 
+# Colors
 C_RESET='\033[0m'
 C_BOLD='\033[1m'
 C_DIM='\033[2m'
 C_RED='\033[0;31m'
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[0;33m'
+C_BLUE='\033[0;34m'
 C_CYAN='\033[0;36m'
 C_WHITE='\033[1;37m'
-C_TEAL='\033[38;5;30m'
 
+# Box width (inner content = 63 total - 4 for borders = 59)
 BOX_W=59
 
-# Hostname color from /etc/pi-role
+# Hostname color from /etc/pi-role (prod=red, dev=green, monitor=blue, default=cyan)
+HOST_COLOR="${C_CYAN}"
 if [[ -f /etc/pi-role ]]; then
-    case "$(cat /etc/pi-role | tr -d '[:space:]')" in
-        prod|production) HOST_COLOR="${C_RED}" ;;
-        dev|development) HOST_COLOR="${C_GREEN}" ;;
-        monitor*)        HOST_COLOR='\033[0;34m' ;;
-        *)               HOST_COLOR="${C_TEAL}" ;;
+    case "$(cat /etc/pi-role | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" in
+        prod*)    HOST_COLOR="${C_RED}" ;;
+        dev*)     HOST_COLOR="${C_GREEN}" ;;
+        monitor*) HOST_COLOR="${C_BLUE}" ;;
     esac
-else
-    HOST_COLOR="${C_TEAL}"
 fi
 
-# Taglines
+# Taglines — random on each login. Dry humor, D&D-themed, SA goon energy.
 TAGLINES=(
     "It compiles. Ship it."
     "Works on my machine."
@@ -1917,50 +2255,58 @@ TAGLINES=(
     "DNS: it's always DNS"
     "There's no place like 127.0.0.1"
     "Not a bug, a surprise feature"
-    "Held together with zip ties"
+    "Held together with zip ties and hope"
     "Future me problem"
     "chmod 777 and pray"
     "Over-engineered with love"
-    "99% uptime, 1% dread"
+    "99% uptime, 1% existential dread"
     "Keep calm and blame the network"
     "Have you tried rebooting?"
-    "The Sage of Shadowdale says: read the logs"
-    "The Sage of Shadowdale says: always check DNS first"
-    "The Sage of Shadowdale says: backups are love letters to your future self"
-    "The Sage of Shadowdale says: a reboot solves 90% of problems"
-    "The Sage of Shadowdale says: never deploy on Friday"
-    "The Sage of Shadowdale says: if it ain't broke, don't upgrade it"
-    "Cowie approves of this session"
-    "Gemma walked across the keyboard. Check recent commits."
+    "Sage of Shadowdale says: check your logs"
+    "Roll for Initiative. NAT 1. The server reboots."
+    "You have encountered a wild segfault"
+    "The DM says: your config file is cursed"
+    "Charisma check failed. Access denied."
+    "You find a scroll. It reads: man page."
+    "Critical hit on uptime"
+    "The bard casts Vicious Mockery on systemd"
+    "Your party rests. The cron job does not."
+    "Perception check: you notice the disk is 90% full"
+    "The rogue pickpockets your SSH keys"
+    "Long rest complete. All spell slots restored."
 )
 
+# Tips — shown ~30% of logins
 TIPS=(
     "btop = pretty system monitor"
     "ncdu = find what's eating disk"
     "z dirname = jump to frequent dirs"
-    "Ctrl+R = fuzzy search command history"
+    "Ctrl+R = search command history"
     "temp = check CPU temperature"
     "ports = see what's listening"
     "!! = repeat last command"
     "sudo !! = last command as root"
     "Ctrl+L = clear screen"
-    "halp = fuzzy-search all aliases"
+    "halp = fuzzy-find your aliases"
     "whereami = instant context when lost"
     "today = see what you did today"
-    "notify-done = push notification via ntfy"
-    "man pages are color-coded now!"
+    "notify-done 'msg' = push to phone"
+    "man pages are color-coded now"
     "cd into a dir = auto-ls for free"
-    "zsh-you-should-use will remind you of aliases"
-    "prefix+| = tmux vertical split"
-    "prefix+- = tmux horizontal split"
+    "dps = pretty docker ps"
+    "gs = git status, gd = git diff"
+    "mkcd dirname = mkdir + cd in one"
 )
 
+# Pick random tagline
 TAGLINE="${TAGLINES[$((RANDOM % ${#TAGLINES[@]}))]}"
 
+# Strip ANSI codes for length calculation
 strip_ansi() {
     echo -e "$1" | sed 's/\x1b\[[0-9;]*m//g'
 }
 
+# Print single line with right padding
 boxline() {
     local content="$1"
     local plain=$(strip_ansi "$content")
@@ -1970,6 +2316,7 @@ boxline() {
     printf "${C_CYAN}│${C_RESET} %b%*s ${C_CYAN}│${C_RESET}\n" "$content" "$pad" ""
 }
 
+# Print two-column line (left and right aligned)
 boxline2() {
     local left="$1"
     local right="$2"
@@ -1982,25 +2329,29 @@ boxline2() {
     printf "${C_CYAN}│${C_RESET} %b%*s%b ${C_CYAN}│${C_RESET}\n" "$left" "$gap" "" "$right"
 }
 
-# Gather system info
+# ─── Gather system info ─────────────────────────────────────────────
+
 HOSTNAME_UPPER=$(hostname | tr '[:lower:]' '[:upper:]')
 UPTIME_STR=$(uptime -p 2>/dev/null) || UPTIME_STR="Up ?"
 UPTIME_STR="${UPTIME_STR/up /Up }"
 
+# Model (short version)
 if [[ -f /proc/device-tree/model ]]; then
     PI_MODEL=$(tr -d '\0' < /proc/device-tree/model | sed 's/Raspberry Pi /RPi /')
 else
     PI_MODEL="Linux"
 fi
 
+# OS info
 if [[ -f /etc/os-release ]]; then
     . /etc/os-release
     OS_INFO="${ID^} ${VERSION_ID:-}"
-    [[ -n "$VERSION_CODENAME" ]] && OS_INFO+=" (${VERSION_CODENAME})"
+    [[ -n "${VERSION_CODENAME:-}" ]] && OS_INFO+=" (${VERSION_CODENAME})"
 else
     OS_INFO="Linux"
 fi
 
+# Kernel (major.minor.patch)
 KERNEL_VER=$(uname -r | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
 
 # Temperature with color coding
@@ -2019,29 +2370,56 @@ else
     TEMP_STR="${C_DIM}N/A${C_RESET}"
 fi
 
+# CPU usage
 CPU_PCT=$(timeout 2 top -bn1 2>/dev/null | awk '/Cpu\(s\)/{print int($2)}')
 [[ -z "$CPU_PCT" ]] && CPU_PCT="?"
 
+# RAM with color
 read -r RAM_USED RAM_TOTAL <<< "$(free -m | awk '/^Mem:/{print $3, $2}')"
-RAM_PCT=$((RAM_USED * 100 / RAM_TOTAL))
-if (( RAM_PCT < 70 )); then RAM_COLOR="${C_GREEN}"
-elif (( RAM_PCT < 85 )); then RAM_COLOR="${C_YELLOW}"
-else RAM_COLOR="${C_RED}"; fi
+if [[ -n "$RAM_TOTAL" && "$RAM_TOTAL" -gt 0 ]] 2>/dev/null; then
+    RAM_PCT=$((RAM_USED * 100 / RAM_TOTAL))
+else
+    RAM_PCT=0
+fi
+if (( RAM_PCT < 70 )); then
+    RAM_COLOR="${C_GREEN}"
+elif (( RAM_PCT < 85 )); then
+    RAM_COLOR="${C_YELLOW}"
+else
+    RAM_COLOR="${C_RED}"
+fi
 
+# Disk with color
 read -r DISK_USED DISK_TOTAL DISK_PCT <<< "$(df -h / | awk 'NR==2{gsub(/%/,"",$5); print $3, $2, $5}')"
-if (( DISK_PCT < 70 )); then DISK_COLOR="${C_GREEN}"
-elif (( DISK_PCT < 85 )); then DISK_COLOR="${C_YELLOW}"
-else DISK_COLOR="${C_RED}"; fi
+if (( DISK_PCT < 70 )); then
+    DISK_COLOR="${C_GREEN}"
+elif (( DISK_PCT < 85 )); then
+    DISK_COLOR="${C_YELLOW}"
+else
+    DISK_COLOR="${C_RED}"
+fi
 
+# IP address, interface, and MAC
 IP_ADDR=$(timeout 2 hostname -I 2>/dev/null | awk '{print $1}')
 [[ -z "$IP_ADDR" ]] && IP_ADDR="unknown"
 NET_IF=$(timeout 2 ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
 [[ -z "$NET_IF" ]] && NET_IF="eth0"
 MAC_ADDR=$(cat "/sys/class/net/${NET_IF}/address" 2>/dev/null || echo "unknown")
 
-STATS="${TEMP_STR}  ${C_DIM}CPU${C_RESET} ${CPU_PCT}%  ${C_DIM}RAM${C_RESET} ${RAM_COLOR}${RAM_PCT}%${C_RESET}  ${C_DIM}Disk${C_RESET} ${DISK_COLOR}${DISK_PCT}%${C_RESET} ${C_DIM}(${DISK_USED}/${DISK_TOTAL})${C_RESET}"
+# Docker container count
+DOCKER_COUNT=""
+if command -v docker &>/dev/null; then
+    local_containers=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$local_containers" -gt 0 ]] 2>/dev/null; then
+        DOCKER_COUNT=" ${C_DIM}Docker${C_RESET} ${local_containers}"
+    fi
+fi
 
-# Print the MOTD
+# Build stats line
+STATS="${TEMP_STR}  ${C_DIM}CPU${C_RESET} ${CPU_PCT}%  ${C_DIM}RAM${C_RESET} ${RAM_COLOR}${RAM_PCT}%${C_RESET}  ${C_DIM}Disk${C_RESET} ${DISK_COLOR}${DISK_PCT}%${C_RESET} ${C_DIM}(${DISK_USED}/${DISK_TOTAL})${C_RESET}${DOCKER_COUNT}"
+
+# ─── Print the MOTD ─────────────────────────────────────────────────
+
 echo ""
 printf "${C_CYAN}╭─────────────────────────────────────────────────────────────╮${C_RESET}\n"
 boxline2 "${C_BOLD}${HOST_COLOR}${HOSTNAME_UPPER}${C_RESET}" "${C_DIM}lab.hoens.fun${C_RESET}"
@@ -2052,22 +2430,12 @@ boxline "${C_DIM}${OS_INFO} · Kernel ${KERNEL_VER}${C_RESET}"
 boxline "${STATS}"
 boxline "${IP_ADDR} ${C_DIM}(${NET_IF})${C_RESET}  ${C_DIM}MAC${C_RESET} ${MAC_ADDR}"
 
-# Docker container status
-if command -v docker &>/dev/null; then
-    local running=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')
-    local total=$(docker ps -aq 2>/dev/null | wc -l | tr -d ' ')
-    if [[ "$total" -gt 0 ]]; then
-        printf "${C_CYAN}├─────────────────────────────────────────────────────────────┤${C_RESET}\n"
-        boxline "${C_DIM}Docker${C_RESET}  ${C_GREEN}${running}${C_RESET}/${total} containers running"
-    fi
-fi
-
-# Alias quick reference
+# Alias quick-reference
 printf "${C_CYAN}├─────────────────────────────────────────────────────────────┤${C_RESET}\n"
-boxline "${C_BOLD}${C_WHITE}Quick Reference${C_RESET}         ${C_DIM}type${C_RESET} ${C_CYAN}halp${C_RESET} ${C_DIM}to fuzzy-search all${C_RESET}"
+boxline "${C_BOLD}${C_WHITE}Quick Reference${C_RESET}         ${C_DIM}type${C_RESET} ${C_CYAN}halp${C_RESET} ${C_DIM}for fuzzy alias search${C_RESET}"
 boxline "${C_DIM}ll${C_RESET} list  ${C_DIM}..${C_RESET} up dir  ${C_DIM}update${C_RESET} apt  ${C_DIM}temp${C_RESET} heat"
 boxline "${C_DIM}gs${C_RESET} git st ${C_DIM}gd${C_RESET} diff   ${C_DIM}myip${C_RESET} pub IP ${C_DIM}ports${C_RESET} listen"
-boxline "${C_CYAN}whereami${C_RESET} ${C_DIM}context${C_RESET}  ${C_CYAN}today${C_RESET} ${C_DIM}activity${C_RESET}  ${C_CYAN}notify-done${C_RESET} ${C_DIM}ntfy${C_RESET}"
+boxline "${C_CYAN}whereami${C_RESET} ${C_DIM}context${C_RESET}  ${C_CYAN}today${C_RESET} ${C_DIM}activity${C_RESET}  ${C_CYAN}notify-done${C_RESET} ${C_DIM}push${C_RESET}"
 
 # ~30% chance to show a tip
 if (( RANDOM % 10 < 3 )); then
@@ -2080,20 +2448,24 @@ printf "${C_CYAN}╰────────────────────
 echo ""
 MOTD_SCRIPT
 
+    # Make it executable
     sudo chmod +x /etc/profile.d/99-earthlume-motd.sh
 
-    # Remove default Debian MOTD
+    # Remove the default Debian disclaimer (/etc/motd)
     if [[ -f /etc/motd ]] && [[ -s /etc/motd ]]; then
+        log "Removing default /etc/motd disclaimer..."
         sudo truncate -s 0 /etc/motd
     fi
 
-    # Disable default MOTD scripts
+    # Disable default MOTD components
     if [[ -d /etc/update-motd.d ]]; then
+        log "Disabling default MOTD scripts..."
         sudo chmod -x /etc/update-motd.d/* 2>/dev/null || true
     fi
 
-    # Disable SSH last login message
+    # Disable last login message
     if [[ -d /etc/ssh/sshd_config.d ]]; then
+        log "Disabling SSH last login message (drop-in)..."
         printf "PrintLastLog no\n" | sudo tee /etc/ssh/sshd_config.d/99-earthlume.conf >/dev/null
     elif [[ -f /etc/ssh/sshd_config ]]; then
         if ! grep -q "^PrintLastLog no" /etc/ssh/sshd_config; then
@@ -2108,6 +2480,7 @@ MOTD_SCRIPT
     success "Custom MOTD installed"
     track_status "Custom MOTD" "OK"
 }
+
 
 #-------------------------------------------------------------------------------
 # CHANGE DEFAULT SHELL
@@ -2131,15 +2504,19 @@ change_shell() {
     fi
 
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would change shell to zsh"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would change shell to $zsh_path" | tee -a "$LOG_FILE"
         track_status "Change Shell" "OK"
         return 0
     fi
 
-    # Detect non-interactive (piped install)
+    # Detect if running non-interactively (piped install)
     if [[ ! -t 0 ]]; then
-        warn "Non-interactive mode — run manually:"
+        warn "Non-interactive mode detected (piped install)"
+        warn "Cannot change shell automatically — run this manually:"
+        echo ""
         echo -e "    ${BOLD}chsh -s $zsh_path${NC}"
+        echo ""
+        warn "Then log out and back in."
         track_status "Change Shell" "SKIP"
         return 0
     fi
@@ -2147,7 +2524,7 @@ change_shell() {
     log "Changing default shell to zsh..."
     if chsh -s "$zsh_path"; then
         success "Default shell changed to zsh"
-        warn "Log out and back in for change to take effect"
+        warn "Log out and back in (or reboot) for change to take effect"
         track_status "Change Shell" "OK"
     else
         error "chsh failed — run manually: chsh -s $zsh_path"
@@ -2162,56 +2539,60 @@ apply_optimizations() {
     header "APPLYING SYSTEM OPTIMIZATIONS"
 
     if [[ "$DO_OPTIMIZE" == false ]]; then
-        log "Skipping optimizations (use --optimize to enable)"
+        log "Skipping optimizations (use --optimize flag to enable)"
         track_status "Optimizations" "SKIP"
-        return 0
-    fi
-
-    if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would apply system optimizations"
-        track_status "Optimizations" "OK"
         return 0
     fi
 
     local opt_failures=0
 
-    # Reduce swappiness
-    if [[ $(cat /proc/sys/vm/swappiness) -gt 10 ]]; then
+    # Reduce swappiness (less aggressive swap on SD cards)
+    if [[ -f /proc/sys/vm/swappiness ]] && [[ $(cat /proc/sys/vm/swappiness) -gt 10 ]]; then
         log "Reducing swappiness to 10..."
-        if echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swappiness.conf > /dev/null; then
+        if [[ "$DRY_RUN" == true ]]; then
+            echo -e "  ${CYAN}[DRY RUN]${NC} Would reduce swappiness to 10" | tee -a "$LOG_FILE"
+        elif echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swappiness.conf > /dev/null; then
             sudo sysctl -p /etc/sysctl.d/99-swappiness.conf 2>/dev/null
             success "Swappiness reduced"
         else
+            error "Failed to set swappiness"
             ((opt_failures++)) || true
         fi
     else
         success "Swappiness already optimal"
     fi
 
-    # Limit journal size
+    # Limit journal size (saves SD card writes)
     local jdrop="/etc/systemd/journald.conf.d/99-earthlume-limit.conf"
     if [[ -f "$jdrop" ]] && grep -qE '^\s*SystemMaxUse\s*=\s*50M\s*$' "$jdrop" 2>/dev/null; then
-        success "Journald already limited"
+        success "Journald already limited (drop-in present)"
     else
         log "Limiting journald to 50MB..."
-        if sudo mkdir -p /etc/systemd/journald.conf.d && \
-           printf "[Journal]\nSystemMaxUse=50M\n" | sudo tee "$jdrop" >/dev/null; then
+        if [[ "$DRY_RUN" == true ]]; then
+            echo -e "  ${CYAN}[DRY RUN]${NC} Would limit journald to 50MB" | tee -a "$LOG_FILE"
+        elif sudo mkdir -p /etc/systemd/journald.conf.d && \
+             printf "[Journal]\nSystemMaxUse=50M\n" | sudo tee "$jdrop" >/dev/null; then
             sudo systemctl restart systemd-journald 2>/dev/null || true
             success "Journald limited"
         else
+            error "Failed to configure journald"
             ((opt_failures++)) || true
         fi
     fi
 
-    # PCIe Gen 3 on Pi 5
+    # Enable PCIe Gen 3 on Pi 5
     if [[ "$HAS_PCIE" == true ]] && [[ -n "${BOOT_CONFIG:-}" ]]; then
         if grep -qE '^\s*dtparam=pciex1_gen=3' "$BOOT_CONFIG" 2>/dev/null; then
             success "PCIe Gen 3 already enabled"
         else
             log "Enabling PCIe Gen 3 in $BOOT_CONFIG..."
-            if echo -e "\n# PCIe Gen 3 (pi-bootstrap)\ndtparam=pciex1_gen=3" | sudo tee -a "$BOOT_CONFIG" >/dev/null; then
-                success "PCIe Gen 3 enabled (reboot required)"
+            if [[ "$DRY_RUN" == true ]]; then
+                echo -e "  ${CYAN}[DRY RUN]${NC} Would enable PCIe Gen 3" | tee -a "$LOG_FILE"
+            elif echo -e "\n# PCIe Gen 3 — doubles NVMe/Hailo throughput (pi-bootstrap v20)\ndtparam=pciex1_gen=3" | sudo tee -a "$BOOT_CONFIG" >/dev/null; then
+                success "PCIe Gen 3 enabled (takes effect after reboot)"
+                warn "Reboot required for PCIe Gen 3"
             else
+                error "Failed to enable PCIe Gen 3"
                 ((opt_failures++)) || true
             fi
         fi
@@ -2223,9 +2604,11 @@ apply_optimizations() {
             success "Fan curve already configured"
         elif [[ -d /sys/class/thermal/cooling_device0 ]]; then
             log "Setting fan curve in $BOOT_CONFIG..."
-            if cat << 'FANCURVE' | sudo tee -a "$BOOT_CONFIG" >/dev/null
+            if [[ "$DRY_RUN" == true ]]; then
+                echo -e "  ${CYAN}[DRY RUN]${NC} Would configure fan curve" | tee -a "$LOG_FILE"
+            elif cat <<'FANCURVE' | sudo tee -a "$BOOT_CONFIG" >/dev/null
 
-# Fan curve — start early, ramp fast (pi-bootstrap)
+# Fan curve — start early, ramp fast, keep cool (pi-bootstrap v20)
 dtparam=fan_temp0=45000
 dtparam=fan_temp0_hyst=5000
 dtparam=fan_temp0_speed=75
@@ -2237,14 +2620,16 @@ dtparam=fan_temp2_hyst=5000
 dtparam=fan_temp2_speed=250
 FANCURVE
             then
-                success "Fan curve configured (reboot required)"
+                success "Fan curve configured (takes effect after reboot)"
             else
+                error "Failed to set fan curve"
                 ((opt_failures++)) || true
             fi
         fi
     fi
 
     if [[ $opt_failures -eq 0 ]]; then
+        success "Optimizations applied"
         track_status "Optimizations" "OK"
     else
         track_status "Optimizations" "FAIL"
@@ -2252,11 +2637,12 @@ FANCURVE
 }
 
 #-------------------------------------------------------------------------------
-# HEALTH CHECK
+# HEALTH CHECK — baseline snapshot for known-good state
 #-------------------------------------------------------------------------------
 health_check() {
     header "HEALTH CHECK (baseline snapshot)"
 
+    # vcgencmd sanity
     if command -v vcgencmd &>/dev/null; then
         local temp throttle firmware
         temp=$(vcgencmd measure_temp 2>/dev/null || echo "N/A")
@@ -2267,47 +2653,51 @@ health_check() {
         log "  Throttle:  $throttle"
         log "  Firmware:  $firmware"
 
+        # Decode throttle flags
         local flags="${throttle##*=}"
         if [[ "$flags" == "0x0" ]]; then
-            success "No throttling detected"
+            success "No throttling detected — clean baseline"
         elif [[ "$flags" =~ ^0x[0-9a-fA-F]+$ ]]; then
-            warn "Throttle flags: $flags"
-            [[ $((flags & 0x1)) -ne 0 ]] && warn "  Under-voltage detected"
-            [[ $((flags & 0x2)) -ne 0 ]] && warn "  ARM frequency capped"
-            [[ $((flags & 0x4)) -ne 0 ]] && warn "  Currently throttled"
-            [[ $((flags & 0x8)) -ne 0 ]] && warn "  Soft temperature limit"
+            warn "Throttle flags: $flags (undervoltage or thermal event)"
+            [[ $((flags & 0x1)) -ne 0 ]] && warn "  -> Under-voltage detected"
+            [[ $((flags & 0x2)) -ne 0 ]] && warn "  -> ARM frequency capped"
+            [[ $((flags & 0x4)) -ne 0 ]] && warn "  -> Currently throttled"
+            [[ $((flags & 0x8)) -ne 0 ]] && warn "  -> Soft temperature limit active"
+        else
+            warn "Could not parse throttle flags: $flags"
         fi
     else
-        log "  vcgencmd not available"
+        log "  vcgencmd not available (not a Pi or not in PATH)"
     fi
 
     # dmesg error scan
-    log "  Scanning dmesg..."
+    log ""
+    log "  Scanning dmesg for warnings/errors..."
     local dmesg_issues
-    dmesg_issues=$(dmesg --level=err,warn 2>/dev/null || sudo dmesg --level=err,warn 2>/dev/null)
+    dmesg_issues=$(dmesg --level=err,warn 2>/dev/null || sudo dmesg --level=err,warn 2>/dev/null || echo "")
     dmesg_issues=$(echo "$dmesg_issues" | grep -iE 'voltage|throttl|nvme|error|fail|orphan' | tail -10)
     if [[ -n "$dmesg_issues" ]]; then
-        warn "dmesg flagged items (see log)"
+        warn "dmesg flagged items (review in log):"
         while IFS= read -r line; do
             log "    $line"
         done <<< "$dmesg_issues"
     else
-        success "dmesg clean"
+        success "dmesg clean — no voltage/NVMe/orphan issues"
     fi
 
     track_status "Health Check" "OK"
 }
 
 #-------------------------------------------------------------------------------
-# WRITE /etc/pi-info
+# WRITE /etc/pi-info — quick reference for MAC/IP
 #-------------------------------------------------------------------------------
 write_pi_info() {
+    log "Writing /etc/pi-info..."
+
     if [[ "$DRY_RUN" == true ]]; then
-        success "[DRY RUN] Would write /etc/pi-info"
+        echo -e "  ${CYAN}[DRY RUN]${NC} Would write /etc/pi-info" | tee -a "$LOG_FILE"
         return 0
     fi
-
-    log "Writing /etc/pi-info..."
 
     local net_if
     net_if=$(timeout 2 ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
@@ -2317,28 +2707,30 @@ write_pi_info() {
     mac_addr=$(cat "/sys/class/net/${net_if}/address" 2>/dev/null || echo "unknown")
 
     sudo tee /etc/pi-info >/dev/null <<EOF
-# Pi network info — pi-bootstrap v${VERSION} on $(date -Iseconds)
+# Pi network info — generated by pi-bootstrap v20 on $(date -Iseconds)
+# Useful for OPNsense static leases, firewall rules, etc.
 HOSTNAME=$(hostname)
 MODEL=$PI_MODEL
 INTERFACE=$net_if
 IP_ADDRESS=${ip_addr:-unknown}
 MAC_ADDRESS=${mac_addr}
 EOF
-    success "Wrote /etc/pi-info"
+    success "Wrote /etc/pi-info (MAC + IP bookmark)"
 }
+
 
 #-------------------------------------------------------------------------------
 # UNINSTALL
 #-------------------------------------------------------------------------------
 uninstall_bootstrap() {
+    header "UNINSTALLING PI-BOOTSTRAP"
+
     echo ""
-    echo -e "${BOLD}${CYAN}PI-BOOTSTRAP UNINSTALL${NC}"
-    echo ""
-    echo "This will remove pi-bootstrap configuration files:"
-    echo "  - ~/.antidote/"
-    echo "  - ~/.powerlevel10k/"
+    echo -e "${BOLD}This will remove the following:${NC}"
+    echo "  - ~/.antidote (plugin manager)"
+    echo "  - ~/.powerlevel10k (prompt theme)"
     echo "  - ~/.zsh_plugins.txt, ~/.zsh_plugins.zsh"
-    echo "  - ~/.config/zsh/aliases/"
+    echo "  - ~/.config/zsh/aliases/ (modular aliases)"
     echo "  - ~/.config/starship.toml"
     echo "  - ~/.config/bat/themes/Catppuccin*"
     echo "  - ~/.config/btop/themes/catppuccin*"
@@ -2346,71 +2738,169 @@ uninstall_bootstrap() {
     echo "  - ~/.tmux.conf, ~/.tmux/plugins/"
     echo "  - /etc/profile.d/99-earthlume-motd.sh"
     echo ""
-    echo "Installed packages (zsh, fzf, bat, etc.) will NOT be removed."
+    echo -e "${YELLOW}NOTE: apt packages will NOT be removed.${NC}"
     echo ""
 
-    if [[ -t 0 ]]; then
-        echo -n "Proceed? [y/N] "
-        read -r yn
-        [[ "$yn" != [yY]* ]] && { echo "Cancelled."; return 0; }
-    else
-        echo "Non-interactive mode — proceeding with uninstall"
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "${CYAN}[DRY RUN] Would remove all of the above.${NC}"
+        return 0
     fi
 
-    rm -rf "$HOME/.antidote"
-    rm -rf "$HOME/.powerlevel10k"
-    rm -f "$HOME/.zsh_plugins.txt" "$HOME/.zsh_plugins.zsh"
-    rm -rf "$HOME/.config/zsh/aliases"
-    rm -f "$HOME/.config/starship.toml"
+    # Prompt for confirmation
+    if [[ -t 0 ]]; then
+        echo -n "Proceed with uninstall? [y/N] "
+        local yn
+        read -r yn
+        if [[ "$yn" != [yY]* ]]; then
+            echo "Aborted."
+            return 0
+        fi
+    else
+        warn "Non-interactive mode — proceeding with uninstall"
+    fi
+
+    # Remove antidote
+    if [[ -d "$HOME/.antidote" ]]; then
+        rm -rf "$HOME/.antidote"
+        success "Removed ~/.antidote"
+    fi
+
+    # Remove powerlevel10k
+    if [[ -d "$HOME/.powerlevel10k" ]]; then
+        rm -rf "$HOME/.powerlevel10k"
+        success "Removed ~/.powerlevel10k"
+    fi
+
+    # Remove plugin files
+    rm -f "$HOME/.zsh_plugins.txt" "$HOME/.zsh_plugins.zsh" 2>/dev/null
+    success "Removed plugin files"
+
+    # Remove modular aliases
+    if [[ -d "$HOME/.config/zsh/aliases" ]]; then
+        rm -rf "$HOME/.config/zsh/aliases"
+        success "Removed modular aliases"
+    fi
+
+    # Remove starship config
+    rm -f "$HOME/.config/starship.toml" 2>/dev/null
+
+    # Remove catppuccin bat themes
     rm -f "$HOME/.config/bat/themes/Catppuccin"* 2>/dev/null
+    # Rebuild bat cache if bat exists
+    if command -v bat &>/dev/null; then
+        bat cache --build &>/dev/null || true
+    elif command -v batcat &>/dev/null; then
+        batcat cache --build &>/dev/null || true
+    fi
+
+    # Remove catppuccin btop themes
     rm -f "$HOME/.config/btop/themes/catppuccin"* 2>/dev/null
-    rm -rf "$HOME/.config/zellij"
-    rm -f "$HOME/.tmux.conf"
-    rm -rf "$HOME/.tmux/plugins"
-    sudo rm -f /etc/profile.d/99-earthlume-motd.sh 2>/dev/null || true
+
+    # Remove zellij config
+    if [[ -d "$HOME/.config/zellij" ]]; then
+        rm -rf "$HOME/.config/zellij"
+        success "Removed zellij config"
+    fi
+
+    # Remove tmux config and plugins
+    rm -f "$HOME/.tmux.conf" 2>/dev/null
+    if [[ -d "$HOME/.tmux/plugins" ]]; then
+        rm -rf "$HOME/.tmux/plugins"
+        success "Removed tmux plugins"
+    fi
+
+    # Remove MOTD
+    if [[ -f /etc/profile.d/99-earthlume-motd.sh ]]; then
+        sudo rm -f /etc/profile.d/99-earthlume-motd.sh
+        success "Removed custom MOTD"
+    fi
+
+    # Remove p10k config
+    rm -f "$HOME/.p10k.zsh" 2>/dev/null
 
     # Restore backup if available
     local latest_backup
-    latest_backup=$(ls -1d "$HOME/.pi-bootstrap-backups/"* 2>/dev/null | tail -1)
-    if [[ -n "$latest_backup" ]] && [[ -d "$latest_backup" ]]; then
+    latest_backup=$(ls -td "$HOME/.pi-bootstrap-backups/"* 2>/dev/null | head -1)
+    if [[ -n "$latest_backup" && -d "$latest_backup" ]]; then
         echo ""
-        echo "Restoring configs from: $latest_backup"
-        for f in "$latest_backup"/*; do
-            [[ -f "$f" ]] && cp "$f" "$HOME/" && echo "  Restored: $(basename "$f")"
-        done
+        echo -e "${BOLD}Found backup: $latest_backup${NC}"
+        if [[ -t 0 ]]; then
+            echo -n "Restore backed-up configs? [y/N] "
+            local yn2
+            read -r yn2
+            if [[ "$yn2" == [yY]* ]]; then
+                for file in "$latest_backup"/*; do
+                    local basename
+                    basename=$(basename "$file")
+                    cp "$file" "$HOME/.$basename" 2>/dev/null || cp "$file" "$HOME/$basename" 2>/dev/null || true
+                    success "Restored: $basename"
+                done
+            fi
+        fi
+    fi
+
+    # Optionally switch back to bash
+    if [[ -t 0 ]]; then
+        echo ""
+        echo -n "Change shell back to bash? [y/N] "
+        local yn3
+        read -r yn3
+        if [[ "$yn3" == [yY]* ]]; then
+            local bash_path
+            bash_path=$(command -v bash)
+            if chsh -s "$bash_path" 2>/dev/null; then
+                success "Shell changed back to bash"
+            else
+                warn "chsh failed — run manually: chsh -s $bash_path"
+            fi
+        fi
     fi
 
     echo ""
-    echo -e "${GREEN}Uninstall complete.${NC}"
-    echo "To switch back to bash: chsh -s /bin/bash"
-    return 0
+    success "Uninstall complete. Log out and back in for changes to take effect."
 }
 
 #-------------------------------------------------------------------------------
-# FINAL SUMMARY
+# FINAL SUMMARY WITH STATUS REPORT
 #-------------------------------------------------------------------------------
 print_summary() {
     header "BOOTSTRAP COMPLETE"
 
+    # Status report
     echo ""
     echo -e "${BOLD}INSTALLATION STATUS${NC}"
-    echo "───────────────────────────────────────────────────────────"
+    echo "----------------------------------------------------------------------"
 
     local all_steps=(
-        "Hardware Detection" "Backup Configs" "Time Sync" "OS Update"
-        "Core Packages" "Full Packages" "Antidote" "Plugins" "Prompt"
-        "P10k Config" "Fonts" "Generate .zshrc" "Catppuccin Theme"
-        "tmux Config" "Modular Aliases" "Custom MOTD" "Change Shell"
-        "Optimizations" "Health Check"
+        "Hardware Detection"
+        "Backup Configs"
+        "Time Sync"
+        "OS Update"
+        "Install Packages"
+        "Antidote"
+        "Plugins"
+        "Powerlevel10k"
+        "P10k Config"
+        "Nerd Fonts"
+        "Starship Config"
+        "Generate .zshrc"
+        "Catppuccin Theme"
+        "tmux Config"
+        "Modular Aliases"
+        "Custom MOTD"
+        "Change Shell"
+        "Optimizations"
+        "Health Check"
     )
 
     for step in "${all_steps[@]}"; do
         local status="${STATUS[$step]:-N/A}"
         case $status in
-            OK)   echo -e "  ${GREEN}✓${NC} $step" ;;
-            FAIL) echo -e "  ${RED}✗${NC} $step" ;;
-            SKIP) echo -e "  ${YELLOW}○${NC} $step (skipped)" ;;
-            *)    echo -e "  ${BLUE}?${NC} $step" ;;
+            OK)   echo -e "  ${GREEN}[ok]${NC}   $step" ;;
+            FAIL) echo -e "  ${RED}[ERR]${NC}  $step" ;;
+            SKIP) echo -e "  ${YELLOW}[--]${NC}   $step (skipped)" ;;
+            N/A)  ;; # Don't show steps that weren't relevant to this tier
+            *)    echo -e "  ${BLUE}[??]${NC}   $step" ;;
         esac
     done
 
@@ -2421,73 +2911,69 @@ print_summary() {
         echo -e "${GREEN}All steps completed successfully${NC}"
     fi
 
+    # System summary
     echo ""
     echo -e "${BOLD}SYSTEM${NC}"
-    echo "───────────────────────────────────────────────────────────"
+    echo "----------------------------------------------------------------------"
     echo "  Model:    $PI_MODEL"
     echo "  OS:       $OS_NAME"
     echo "  RAM:      ${RAM_MB} MB"
-    echo "  Arch:     $DPKG_ARCH"
     echo "  Tier:     $TIER"
     echo ""
 
+    # Files created
     echo -e "${BOLD}FILES CREATED${NC}"
-    echo "───────────────────────────────────────────────────────────"
-    echo "  Config:    ~/.zshrc"
-    echo "  Plugins:   ~/.zsh_plugins.txt"
-    echo "  Aliases:   ~/.config/zsh/aliases/*.zsh"
-    if [[ "$TIER" == "full" ]]; then
-        echo "  Prompt:    ~/.config/starship.toml"
-    else
-        echo "  Prompt:    ~/.p10k.zsh"
-    fi
-    echo "  tmux:      ~/.tmux.conf"
-    echo "  MOTD:      /etc/profile.d/99-earthlume-motd.sh"
-    echo "  Pi Info:   /etc/pi-info"
-    echo "  Backups:   $BACKUP_DIR"
-    echo "  Log:       $LOG_FILE"
-    echo ""
-
-    echo -e "${BOLD}NEXT STEPS${NC}"
-    echo "───────────────────────────────────────────────────────────"
-    echo "  1. Log out and back in (or run: exec zsh)"
+    echo "----------------------------------------------------------------------"
+    echo "  Config:   ~/.zshrc"
     if [[ "$TIER" != "full" ]]; then
-        echo "  2. Set terminal font to 'MesloLGS NF'"
-        echo "  3. Run 'p10k configure' to customize prompt per machine"
+        echo "  Prompt:   ~/.p10k.zsh"
+    else
+        echo "  Prompt:   ~/.config/starship.toml"
     fi
+    echo "  Plugins:  ~/.zsh_plugins.txt"
+    echo "  Aliases:  ~/.config/zsh/aliases/*.zsh"
+    echo "  tmux:     ~/.tmux.conf"
+    echo "  MOTD:     /etc/profile.d/99-earthlume-motd.sh"
+    echo "  Pi Info:  /etc/pi-info"
+    echo "  Backups:  $BACKUP_DIR"
+    echo "  Log:      $LOG_FILE"
     echo ""
 
-    echo -e "${BOLD}NTFY.SH NOTIFICATIONS${NC}"
-    echo "───────────────────────────────────────────────────────────"
-    echo "  Get push notifications when long commands finish:"
-    echo "    mkdir -p ~/.config/adhd-kit"
-    echo "    echo 'your-topic' > ~/.config/adhd-kit/ntfy-topic"
-    echo "  Subscribe at https://ntfy.sh or the ntfy mobile app."
+    # Next steps
+    echo -e "${BOLD}NEXT STEPS${NC}"
+    echo "----------------------------------------------------------------------"
+    echo "  1. Start zsh:  exec zsh"
+    if [[ "$TIER" != "full" ]]; then
+        echo "  2. Set terminal font to 'MesloLGS NF' (for powerlevel10k icons)"
+    fi
+    echo "  3. Install tmux plugins: press prefix + I inside tmux"
+    echo "  4. Set up ntfy.sh push notifications:"
+    echo "     echo 'your-topic' > ~/.config/adhd-kit/ntfy-topic"
     echo ""
 
-    echo -e "${DIM}Full diagnostics: bash pi-bootstrap.sh --info-only${NC}"
-    echo -e "${DIM}Undo everything:  bash pi-bootstrap.sh --uninstall${NC}"
+    echo -e "${DIM}For full hardware diagnostics: bash pi-bootstrap.sh --info-only${NC}"
+    echo -e "${DIM}To undo everything: bash pi-bootstrap.sh --uninstall${NC}"
     echo ""
 }
 
 #-------------------------------------------------------------------------------
-# MAIN
+# MAIN EXECUTION
 #-------------------------------------------------------------------------------
-main() {
-    parse_args "$@"
 
+    # Banner
     echo ""
-    echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${CYAN}║   PI-BOOTSTRAP — ADHD-Friendly Shell Setup  (v${VERSION})       ║${NC}"
-    echo -e "${BOLD}${CYAN}║   by Earthlume · lab.hoens.fun                          ║${NC}"
-    echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${BOLD}${CYAN}+====================================================================+${NC}"
+    echo -e "${BOLD}${CYAN}|     PI-BOOTSTRAP — ADHD-Friendly Shell Setup  (v${VERSION})              |${NC}"
+    echo -e "${BOLD}${CYAN}|     by Earthlume  ·  lab.hoens.fun                                |${NC}"
+    echo -e "${BOLD}${CYAN}|     \"Roll for Initiative. You rolled a 20.\"                        |${NC}"
+    echo -e "${BOLD}${CYAN}+====================================================================+${NC}"
     echo ""
 
     # Initialize log
     echo "=== pi-bootstrap.sh v${VERSION} started $(date -Iseconds) ===" > "$LOG_FILE"
 
     if [[ "$DRY_RUN" == true ]]; then
-        echo -e "${YELLOW}DRY RUN MODE — no changes will be made${NC}"
+        echo -e "${YELLOW}*** DRY RUN MODE — no changes will be made ***${NC}"
         echo ""
     fi
 
@@ -2497,36 +2983,45 @@ main() {
         return 0
     fi
 
-    # Full install
+    # Uninstall mode
+    if [[ "$DO_UNINSTALL" == true ]]; then
+        uninstall_bootstrap
+        return 0
+    fi
+
+    # ── Full install pipeline ────────────────────────────────────────
+
     detect_system
     backup_configs
-    verify_time_sync       || true
-    update_os              || true
-    install_core_packages  || true
+    verify_time_sync        || true
+    update_os               || true
+    install_core_packages   || true
     install_standard_packages || true
-    install_zoxide         || true
-    install_uv             || true
-    install_full_packages  || true
-    install_starship       || true
-    install_zellij         || true
-    install_antidote       || true
-    create_plugin_list     || true
-    install_p10k           || true
-    install_fonts          || true
-    generate_p10k_config   || true
+    install_full_packages   || true
+    install_zoxide          || true
+    install_uv              || true
+    install_starship        || true
+    install_zellij          || true
+    install_antidote        || true
+    create_plugin_list      || true
+    install_p10k            || true
+    install_fonts           || true
+    generate_p10k_config    || true
     generate_starship_config || true
+    configure_catppuccin    || true
+    configure_tmux          || true
+    create_modular_aliases  || true
     generate_zshrc
-    configure_catppuccin   || true
-    configure_tmux         || true
-    create_modular_aliases || true
-    install_motd           || true
-    change_shell           || true
-    apply_optimizations    || true
-    health_check           || true
-    write_pi_info          || true
+    install_motd            || true
+    change_shell            || true
+    apply_optimizations     || true
+    health_check            || true
+    write_pi_info           || true
     print_summary
 
+    # Return failure count (don't use 'exit' — kills the shell when piped)
     return $FAILURES
+
 }
 
 main "$@"
